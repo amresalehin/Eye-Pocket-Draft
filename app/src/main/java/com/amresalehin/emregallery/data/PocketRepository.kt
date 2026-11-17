@@ -295,6 +295,13 @@ class PocketRepository(
         val url = item.sourceUrl
         if (url.isBlank()) return 0L
 
+        // HLS/DASH playlist length is not the total streamed media size.
+        // Without an extractor-reported total or a completed local file, keep it unknown.
+        if (item.isStream ||
+            url.contains(".m3u8", ignoreCase = true) ||
+            url.contains(".mpd", ignoreCase = true)
+        ) return 0L
+
         sizeCache[url]?.takeIf { it > 0L }?.let { return it }
         sizeCache[item.id]?.takeIf { it > 0L }?.let { return it }
 
