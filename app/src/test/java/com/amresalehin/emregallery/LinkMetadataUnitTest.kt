@@ -425,7 +425,7 @@ class LinkMetadataUnitTest {
     }
 
     @Test
-    fun testStaticHtmlExtractionRetainsDeclaredImageDimensions() {
+    fun testStaticHtmlExtractionDoesNotTreatDisplayAttributesAsIntrinsicDimensions() {
         val doc = Jsoup.parse(
             """
                 <html><body>
@@ -444,8 +444,8 @@ class LinkMetadataUnitTest {
         )
         val hero = items.first { it.sourceUrl == "https://example.com/images/hero.jpg" }
 
-        assertEquals(1280, hero.width)
-        assertEquals(720, hero.height)
+        assertEquals("HTML display width is not proof of intrinsic dimensions", 0, hero.width)
+        assertEquals("HTML display height is not proof of intrinsic dimensions", 0, hero.height)
     }
 
     @Test
