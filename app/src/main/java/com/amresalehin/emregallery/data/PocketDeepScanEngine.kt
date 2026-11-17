@@ -270,7 +270,7 @@ object PocketDeepScanEngine {
                 var found = [];
                 var seen = {};
 
-                function add(url, hint, isVideo) {
+                function add(url, hint, isVideo, width, height) {
                     if (!url || typeof url !== 'string') return;
                     url = url.trim();
                     if (!url || url.indexOf('http') !== 0 || url.indexOf('data:') === 0) return;
@@ -280,7 +280,9 @@ object PocketDeepScanEngine {
                     found.push({
                         url: url,
                         title: hint || '',
-                        isVideo: isVideo === true
+                        isVideo: isVideo === true,
+                        width: Number(width) > 0 ? Number(width) : 0,
+                        height: Number(height) > 0 ? Number(height) : 0
                     });
                 }
 
@@ -293,8 +295,10 @@ object PocketDeepScanEngine {
                                el.getAttribute('data-lazy-src') || el.getAttribute('data-large-file') ||
                                el.getAttribute('data-hi-res-src');
                     var alt = el.getAttribute('alt') || el.getAttribute('title') || '';
-                    if (lazy) add(lazy, alt, false);
-                    if (src) add(src, alt, false);
+                    var imgWidth = el.naturalWidth || el.width || 0;
+                    var imgHeight = el.naturalHeight || el.height || 0;
+                    if (lazy) add(lazy, alt, false, imgWidth, imgHeight);
+                    if (src) add(src, alt, false, imgWidth, imgHeight);
 
                     // Parse srcset
                     var ss = el.getAttribute('srcset') || el.getAttribute('data-srcset');
@@ -327,7 +331,7 @@ object PocketDeepScanEngine {
                     var poster = vEl.getAttribute('poster');
                     if (poster) add(poster, 'Video Poster', false);
                     var vSrc = vEl.currentSrc || vEl.src || vEl.getAttribute('data-src') || vEl.getAttribute('data-url');
-                    if (vSrc) add(vSrc, 'Video', true);
+                    if (vSrc) add(vSrc, 'Video', true, vEl.videoWidth || vEl.width, vEl.videoHeight || vEl.height);
                     var vs = vEl.getElementsByTagName('source');
                     for (var vsIdx = 0; vsIdx < vs.length; vsIdx++) {
                         var vsSrc = vs[vsIdx].src || vs[vsIdx].getAttribute('data-src') || vs[vsIdx].getAttribute('data-url');
@@ -451,7 +455,11 @@ object PocketDeepScanEngine {
                         isAudio = isAudio,
                         isStream = isStream,
                         format = format,
-                        dateAddedMillis = System.currentTimeMillis()
+                        dateAddedMillis = System.currentTimeMillis(),
+                        width = obj.optInt("width", 0).takeIf { it > 0 }
+                            ?: MediaCaptureEngine.extractDimension(null, resolvedUrl, true) ?: 0,
+                        height = obj.optInt("height", 0).takeIf { it > 0 }
+                            ?: MediaCaptureEngine.extractDimension(null, resolvedUrl, false) ?: 0
                     )
                 )
             }
