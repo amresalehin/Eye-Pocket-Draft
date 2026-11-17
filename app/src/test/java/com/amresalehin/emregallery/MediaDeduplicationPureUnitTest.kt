@@ -711,6 +711,83 @@ class MediaDeduplicationPureUnitTest {
         assertEquals("?1", headers["Sec-Ch-Ua-Mobile"])
         assertEquals("\"Android\"", headers["Sec-Ch-Ua-Platform"])
     }
+
+    @Test
+    fun bookmarkDeduplicationIgnoresKnownTrackingParametersAndQueryOrder() {
+        val first = "https://EXAMPLE.com:443/articles/./economics?id=42&lang=en&utm_source=newsletter&fbclid=tracking"
+        val second = "https://example.com/articles/economics?lang=en&id=42"
+
+        assertEquals(
+            MediaClassifier.bookmarkDeduplicationKey(first),
+            MediaClassifier.bookmarkDeduplicationKey(second)
+        )
+    }
+
+    @Test
+    fun bookmarkDeduplicationPreservesMeaningfulQueryParameters() {
+        val first = "https://example.com/watch?v=video-one&id=10"
+        val second = "https://example.com/watch?v=video-one&id=11"
+        val firstRef = "https://example.com/article?ref=campaign-a"
+        val secondRef = "https://example.com/article?ref=campaign-b"
+
+        assertNotEquals(
+            MediaClassifier.bookmarkDeduplicationKey(first),
+            MediaClassifier.bookmarkDeduplicationKey(second)
+        )
+        assertNotEquals(
+            MediaClassifier.bookmarkDeduplicationKey(firstRef),
+            MediaClassifier.bookmarkDeduplicationKey(secondRef)
+        )
+    }
+
+    @Test
+    fun bookmarkDeduplicationPreservesFragmentsForClientSideRoutes() {
+        val first = "https://example.com/app#/article/one"
+        val second = "https://example.com/app#/article/two"
+
+        assertNotEquals(
+            MediaClassifier.bookmarkDeduplicationKey(first),
+            MediaClassifier.bookmarkDeduplicationKey(second)
+        )
+    }
+
+    @Test
+    fun bookmarkDeduplicationPreservesSignedQueryStrings() {
+        val first = "https://cdn.example.com/file?X-Amz-Signature=abc&utm_source=one"
+        val second = "https://cdn.example.com/file?X-Amz-Signature=abc&utm_source=two"
+        val expired = "https://cdn.example.com/file?X-Amz-Signature=def&utm_source=one"
+
+        assertNotEquals(
+            MediaClassifier.bookmarkDeduplicationKey(first),
+            MediaClassifier.bookmarkDeduplicationKey(second)
+        )
+        assertNotEquals(
+            MediaClassifier.bookmarkDeduplicationKey(first),
+            MediaClassifier.bookmarkDeduplicationKey(expired)
+        )
+    }
+
+    @Test
+    fun bookmarkDeduplicationPreservesOrderingOfRepeatedParameters() {
+        val first = "https://example.com/search?tag=medicine&tag=research"
+        val second = "https://example.com/search?tag=research&tag=medicine"
+
+        assertNotEquals(
+            MediaClassifier.bookmarkDeduplicationKey(first),
+            MediaClassifier.bookmarkDeduplicationKey(second)
+        )
+    }
+
+    @Test
+    fun bookmarkDeduplicationDoesNotCollapseHttpAndHttps() {
+        val httpUrl = "http://example.com/article?id=42&utm_source=mail"
+        val httpsUrl = "https://example.com/article?id=42"
+
+        assertNotEquals(
+            MediaClassifier.bookmarkDeduplicationKey(httpUrl),
+            MediaClassifier.bookmarkDeduplicationKey(httpsUrl)
+        )
+    }
 }
 
 
