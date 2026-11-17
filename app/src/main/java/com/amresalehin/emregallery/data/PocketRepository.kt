@@ -361,7 +361,7 @@ class PocketRepository(
                 sizeProbeSemaphore.withPermit {
                     val result = OkHttpDownloader.probeDirectMedia(url)
                     val contentLength = result.contentLength
-                    if (contentLength != null && contentLength > 0L) {
+                    if (result.isConfirmedDirectMedia && contentLength != null && contentLength > 0L) {
                         sizeCache[url] = contentLength
                         sizeCache[itemId] = contentLength
                         updateItemSizeInBookmarks(itemId, url, contentLength)
