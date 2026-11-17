@@ -102,7 +102,7 @@ class MediaDownloaderTest {
     fun workerPreservesAudioOnlyAndRequiresYoutubeVideoAudioTrack() {
         assertEquals("audio", MediaDownloadWorker.resolveMediaMode(isVideo = false, isAudio = true, isStream = false))
         assertEquals("video", MediaDownloadWorker.resolveMediaMode(isVideo = true, isAudio = false, isStream = false))
-        assertEquals("video", MediaDownloadWorker.resolveMediaMode(isVideo = false, isAudio = false, isStream = true))
+        assertEquals("best", MediaDownloadWorker.resolveMediaMode(isVideo = false, isAudio = false, isStream = true))
         assertEquals("best", MediaDownloadWorker.resolveMediaMode(isVideo = false, isAudio = false, isStream = false))
 
         val videoOnly = FfprobeMediaInfo(
