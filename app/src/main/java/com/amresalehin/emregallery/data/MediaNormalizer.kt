@@ -98,11 +98,26 @@ object MediaNormalizer {
             canonicalKey(src).ifBlank { item.id }
         }
         val largestList = groups.values.map { group ->
-            if (group.size == 1) group.first()
-            else {
-                group.maxWithOrNull { a, b ->
+            if (group.size == 1) {
+                group.first()
+            } else {
+                val bestSource = group.maxWithOrNull { a, b ->
                     compareInboxItemQuality(a, b)
                 } ?: group.first()
+
+                // Source selection and local-file ownership are separate concerns. A larger
+                // remote CDN variant must not make an already-downloaded local copy disappear.
+                val bestLocal = group
+                    .filter { it.localUri.isNotBlank() }
+                    .maxWithOrNull { a, b -> compareInboxItemQuality(a, b) }
+
+                bestSource.copy(
+                    localUri = bestSource.localUri.ifBlank { bestLocal?.localUri.orEmpty() },
+                    sizeBytes = maxOf(bestSource.sizeBytes, bestLocal?.sizeBytes ?: 0L),
+                    width = bestSource.width.takeIf { it > 0 } ?: (bestLocal?.width ?: 0),
+                    height = bestSource.height.takeIf { it > 0 } ?: (bestLocal?.height ?: 0),
+                    dateAddedMillis = maxOf(bestSource.dateAddedMillis, bestLocal?.dateAddedMillis ?: 0L)
+                )
             }
         }
         val (videos, images) = largestList.partition { it.isVideo || it.isStream }
@@ -118,9 +133,11 @@ object MediaNormalizer {
         if ((a.isVideo || a.isStream) && (!b.isVideo && !b.isStream)) return 1
         if ((!a.isVideo && !a.isStream) && (b.isVideo || b.isStream)) return -1
 
-        // Compare parsed pixel areas
-        val aArea = MediaClassifier.parsePixelArea(null, a.sourceUrl)
-        val bArea = MediaClassifier.parsePixelArea(null, b.sourceUrl)
+        // Prefer decoded/source dimensions before inferring dimensions from URL tokens.
+        val aArea = if (a.width > 0 && a.height > 0) a.width.toLong() * a.height.toLong()
+            else MediaClassifier.parsePixelArea(null, a.sourceUrl)
+        val bArea = if (b.width > 0 && b.height > 0) b.width.toLong() * b.height.toLong()
+            else MediaClassifier.parsePixelArea(null, b.sourceUrl)
         if (aArea != null && bArea != null && aArea != bArea) {
             return aArea.compareTo(bArea)
         }

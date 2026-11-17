@@ -759,7 +759,7 @@ def extract_media(url, options_json="{}"):
         "items": []
     })
 
-def _download_with_ytdlp(url, target_path, referer, user_agent, cookies, extra_headers):
+def _download_with_ytdlp(url, target_path, referer, user_agent, cookies, extra_headers, media_mode="best"):
     """Downloads media exclusively via yt-dlp."""
     if not YTDLP_AVAILABLE:
         return False
@@ -780,13 +780,24 @@ def _download_with_ytdlp(url, target_path, referer, user_agent, cookies, extra_h
             http_headers.update(extra_headers)
 
         cookie_file = _prepare_cookiefile(cookies, url)
+        mode = (media_mode or "best").lower()
+        if mode == "audio":
+            # Never fall back to a muxed video when the user explicitly requested audio-only.
+            format_selector = "bestaudio"
+        elif mode == "video":
+            # Prefer a muxed result; separate video+audio is permitted only when yt-dlp can
+            # merge it. Do not silently fall back to a video-only format.
+            format_selector = "best[vcodec!=none][acodec!=none]/bestvideo+bestaudio"
+        else:
+            format_selector = "b[vcodec!=none][acodec!=none]/best[vcodec!=none][acodec!=none]/bestvideo+bestaudio/best"
+
         ydl_opts = {
             "outtmpl": target_path,
             "quiet": True,
             "no_warnings": True,
             "ffmpeg_location": None,
             "prefer_ffmpeg": False,
-            "format": "b[vcodec!=none][acodec!=none]/best[vcodec!=none][acodec!=none]/bestvideo+bestaudio/best",
+            "format": format_selector,
             "socket_timeout": 35,
             "geo_bypass": True,
             "nocheckcertificate": True,
@@ -890,7 +901,7 @@ def _download_with_gallery_dl(url, target_path, referer, user_agent, cookies, ex
         pass
     return False
 
-def download_media_file(media_url, target_path, referer=None, user_agent=None, cookies=None, headers_json=None):
+def download_media_file(media_url, target_path, referer=None, user_agent=None, cookies=None, headers_json=None, media_mode="best"):
     """
     Downloads media file using yt-dlp (primary) and gallery-dl (secondary fallback).
     Ditches all other engines/workflows.
@@ -911,21 +922,30 @@ def download_media_file(media_url, target_path, referer=None, user_agent=None, c
 
     ua = user_agent or "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
-    # 1. Primary: yt-dlp
-    if is_ytdlp_supported(media_url) or (referer and is_ytdlp_supported(referer)):
-        if _download_with_ytdlp(media_url, target_path, referer, ua, cookies, extra_headers):
-            return True
+    mode = (media_mode or "best").strip().lower()
+    if mode not in ("audio", "video"):
+        mode = "best"
 
-    # 2. Secondary fallback: gallery-dl
-    if is_gallery_dl_supported(media_url) or (referer and is_gallery_dl_supported(referer)):
+    # 1. Primary: yt-dlp
+    ytdlp_supported = is_ytdlp_supported(media_url) or (referer and is_ytdlp_supported(referer))
+    if ytdlp_supported:
+        if _download_with_ytdlp(media_url, target_path, referer, ua, cookies, extra_headers, mode):
+            return True
+        # gallery-dl cannot guarantee an audio-only or muxed video result. Never return
+        # a different media type as a fallback for an explicit audio/video request.
+        if mode in ("audio", "video"):
+            return False
+
+    # 2. Secondary fallback: gallery-dl (only when format is not constrained)
+    if mode == "best" and (is_gallery_dl_supported(media_url) or (referer and is_gallery_dl_supported(referer))):
         if _download_with_gallery_dl(media_url, target_path, referer, ua, cookies, extra_headers):
             return True
 
-    # 3. Fallback: try yt-dlp then gallery-dl if not caught by heuristics
-    if _download_with_ytdlp(media_url, target_path, referer, ua, cookies, extra_headers):
+    # 3. Final yt-dlp attempt for generic URLs not recognized by the support registry.
+    if _download_with_ytdlp(media_url, target_path, referer, ua, cookies, extra_headers, mode):
         return True
 
-    if _download_with_gallery_dl(media_url, target_path, referer, ua, cookies, extra_headers):
+    if mode == "best" and _download_with_gallery_dl(media_url, target_path, referer, ua, cookies, extra_headers):
         return True
 
     return False

@@ -7,6 +7,8 @@ import android.util.Log
 import android.webkit.CookieManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import okhttp3.Cookie
 import okhttp3.CookieJar
 import okhttp3.HttpUrl
@@ -18,6 +20,8 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -34,6 +38,7 @@ object OkHttpDownloader {
 
     private const val TAG = "OkHttpDownloader"
     const val DEFAULT_USER_AGENT = BotDetectionMitigator.STEALTH_USER_AGENT
+    private val activeDownloadLocks = Array(64) { Mutex() }
 
     /**
      * Shared bidirectional CookieJar bridging Android WebView CookieManager and in-memory cache.
@@ -474,6 +479,40 @@ object OkHttpDownloader {
     /**
      * Generates a deterministic file identifier from URL and file name to persist partial downloads across retries.
      */
+    internal fun stableDownloadBaseName(mediaUrl: String, fileName: String, downloadId: String?): String {
+        // Canonical media identity is independent of bookmark/item IDs and tracking
+        // parameters. Signed URL parameters remain in the canonical key by MediaClassifier.
+        val canonicalUrl = MediaClassifier.deduplicationKey(mediaUrl).ifBlank { mediaUrl.trim() }
+        val hash = runCatching {
+            val bytes = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(canonicalUrl.toByteArray(Charsets.UTF_8))
+            bytes.take(12).joinToString("") { "%02x".format(it) }
+        }.getOrDefault(Integer.toHexString(canonicalUrl.hashCode()))
+
+        val safeName = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+        val extension = safeName.substringAfterLast('.', "").takeIf { it.isNotBlank() }
+        return if (extension != null) "media_$hash.$extension" else "media_$hash"
+    }
+
+    internal data class ParsedContentRange(
+        val start: Long,
+        val end: Long,
+        val total: Long?
+    )
+
+    internal fun parseContentRangeHeader(value: String?): ParsedContentRange? {
+        if (value.isNullOrBlank()) return null
+        val match = Regex(
+            """^\s*bytes\s+(\d+)-(\d+)/(\d+|\*)\s*$""",
+            RegexOption.IGNORE_CASE
+        ).matchEntire(value) ?: return null
+        val start = match.groupValues[1].toLongOrNull() ?: return null
+        val end = match.groupValues[2].toLongOrNull() ?: return null
+        val total = match.groupValues[3].takeIf { it != "*" }?.toLongOrNull()
+        if (end < start || (total != null && (total <= 0L || end >= total))) return null
+        return ParsedContentRange(start, end, total)
+    }
+
     fun generateDeterministicId(mediaUrl: String, fileName: String): String {
         val hash = runCatching {
             val md = java.security.MessageDigest.getInstance("SHA-256")
@@ -547,6 +586,25 @@ object OkHttpDownloader {
         headers: Map<String, String>? = null,
         domain: String? = null,
         onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)? = null
+    ): DownloadResult {
+        val lockKey = MediaClassifier.deduplicationKey(mediaUrl).ifBlank { mediaUrl.trim() }
+        val lock = activeDownloadLocks[(lockKey.hashCode() and Int.MAX_VALUE) % activeDownloadLocks.size]
+        return lock.withLock {
+            downloadMediaFileDetailedLocked(
+                context, mediaUrl, fileName, referer, downloadId, headers, domain, onProgress
+            )
+        }
+    }
+
+    private suspend fun downloadMediaFileDetailedLocked(
+        context: Context,
+        mediaUrl: String,
+        fileName: String,
+        referer: String?,
+        downloadId: String?,
+        headers: Map<String, String>?,
+        domain: String?,
+        onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)?
     ): DownloadResult = withContext(Dispatchers.IO) {
         val effectiveDomain = domain?.takeIf { it.isNotBlank() }
             ?: extractDomain(referer ?: mediaUrl).takeIf { it != "general" && it != "localhost" }
@@ -560,17 +618,7 @@ object OkHttpDownloader {
         val domainDir = if (effectiveDomain != null) getTargetStorageDir(context, effectiveDomain) else baseDir
 
         val sanitizedName = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
-        val deterministicBase = if (!downloadId.isNullOrBlank()) {
-            val cleanId = downloadId.replace(Regex("[^a-zA-Z0-9._-]"), "_")
-            val ext = sanitizedName.substringAfterLast('.', "")
-            if (ext.isNotEmpty() && !cleanId.endsWith(".$ext", ignoreCase = true)) {
-                "${cleanId}.$ext"
-            } else {
-                cleanId
-            }
-        } else {
-            generateDeterministicId(mediaUrl, sanitizedName)
-        }
+        val deterministicBase = stableDownloadBaseName(mediaUrl, sanitizedName, downloadId)
 
         // Check if an existing resuming temp file is in baseDir (e.g. from local unit tests or unassigned domain)
         val targetDir = if (File(baseDir, "$deterministicBase.downloading").exists() && !File(domainDir, "$deterministicBase.downloading").exists()) {
@@ -601,6 +649,20 @@ object OkHttpDownloader {
         }
 
         var existingBytes = if (tempFile.exists()) tempFile.length() else 0L
+
+        // Resume only when the original resource version can be identified.
+        if (existingBytes > 0L && savedEtag.isNullOrBlank() && savedLastModified.isNullOrBlank()) {
+            Log.w(TAG, "Discarding partial file without a resume validator for $mediaUrl")
+            tempFile.delete()
+            metaFile.delete()
+            existingBytes = 0L
+        }
+        if (existingBytes <= 0L && metaFile.exists()) {
+            // Metadata without its partial file cannot validate a future transfer.
+            metaFile.delete()
+            savedEtag = null
+            savedLastModified = null
+        }
 
         val reqBuilder = Request.Builder()
             .url(mediaUrl)
@@ -635,7 +697,17 @@ object OkHttpDownloader {
             if (response.code == 416) {
                 val cr = response.header("Content-Range")
                 val totalLength = cr?.substringAfterLast('/', "")?.toLongOrNull()
-                if (totalLength != null && totalLength > 0L && existingBytes == totalLength && tempFile.exists() && tempFile.length() == totalLength) {
+                val validatorChanged = (
+                    (!savedEtag.isNullOrBlank() &&
+                        !response.header("ETag").isNullOrBlank() &&
+                        savedEtag != response.header("ETag")) ||
+                    (!savedLastModified.isNullOrBlank() &&
+                        !response.header("Last-Modified").isNullOrBlank() &&
+                        savedLastModified != response.header("Last-Modified"))
+                )
+                if (!validatorChanged && totalLength != null && totalLength > 0L &&
+                    existingBytes == totalLength && tempFile.exists() && tempFile.length() == totalLength
+                ) {
                     response.close()
                     val commitRes = validateAndCommitDownloadedFile(
                         context = context,
@@ -672,42 +744,75 @@ object OkHttpDownloader {
             }
 
             var activeResponse = response
-            var shouldRestartFromZero = false
+            var parsedContentRange: ParsedContentRange? = null
 
-            // Check Content-Range start match before entering processing
-            if (activeResponse.code == 206 && existingBytes > 0L) {
-                val cr = activeResponse.header("Content-Range")
-                if (!cr.isNullOrBlank()) {
-                    val rangeRegex = Regex("""bytes\s+(\d+)-\d+/.*""", RegexOption.IGNORE_CASE)
-                    val match = rangeRegex.find(cr)
-                    val startByte = match?.groupValues?.get(1)?.toLongOrNull()
-                    if (startByte != null && startByte != existingBytes) {
-                        Log.w(TAG, "Content-Range start mismatch: expected $existingBytes, got $startByte. Restarting from byte 0.")
-                        shouldRestartFromZero = true
+            if (activeResponse.code == 206) {
+                parsedContentRange = parseContentRangeHeader(activeResponse.header("Content-Range"))
+                val validatorChanged = existingBytes > 0L && (
+                    (!savedEtag.isNullOrBlank() &&
+                        !activeResponse.header("ETag").isNullOrBlank() &&
+                        savedEtag != activeResponse.header("ETag")) ||
+                    (!savedLastModified.isNullOrBlank() &&
+                        !activeResponse.header("Last-Modified").isNullOrBlank() &&
+                        savedLastModified != activeResponse.header("Last-Modified"))
+                )
+                val invalidRange = parsedContentRange == null ||
+                    parsedContentRange?.start != existingBytes
+
+                if (invalidRange || validatorChanged) {
+                    if (existingBytes <= 0L) {
+                        activeResponse.close()
+                        tempFile.delete()
+                        metaFile.delete()
+                        return@withContext DownloadResult(
+                            file = null,
+                            isSuccessful = false,
+                            statusCode = 206,
+                            bytesDownloaded = 0L,
+                            totalBytes = -1L,
+                            errorMessage = "Server returned an invalid HTTP 206 Content-Range"
+                        )
+                    }
+
+                    Log.w(TAG, "Invalid or changed partial response for $mediaUrl; restarting from byte zero")
+                    activeResponse.close()
+                    tempFile.delete()
+                    metaFile.delete()
+                    existingBytes = 0L
+                    val cleanRequest = Request.Builder()
+                        .url(mediaUrl)
+                        .header("Accept", "*/*")
+                        .apply {
+                            if (!referer.isNullOrBlank()) header("Referer", referer)
+                            headers?.forEach { (k, v) ->
+                                if (!k.equals("Range", ignoreCase = true) &&
+                                    !k.equals("If-Range", ignoreCase = true)
+                                ) header(k, v)
+                            }
+                        }
+                        .build()
+                    activeResponse = client.newCall(cleanRequest).execute()
+
+                    if (activeResponse.code == 206) {
+                        parsedContentRange = parseContentRangeHeader(activeResponse.header("Content-Range"))
+                        if (parsedContentRange == null || parsedContentRange?.start != 0L) {
+                            activeResponse.close()
+                            tempFile.delete()
+                            metaFile.delete()
+                            return@withContext DownloadResult(
+                                file = null,
+                                isSuccessful = false,
+                                statusCode = 206,
+                                bytesDownloaded = 0L,
+                                totalBytes = -1L,
+                                errorMessage = "Clean restart still returned an invalid partial response"
+                            )
+                        }
+                    } else {
+                        parsedContentRange = null
                     }
                 }
             }
-
-            if (shouldRestartFromZero) {
-                activeResponse.close()
-                tempFile.delete()
-                metaFile.delete()
-                existingBytes = 0L
-                val cleanRequest = Request.Builder()
-                    .url(mediaUrl)
-                    .header("Accept", "*/*")
-                    .apply {
-                        if (!referer.isNullOrBlank()) header("Referer", referer)
-                        headers?.forEach { (k, v) ->
-                            if (!k.equals("Range", ignoreCase = true) && !k.equals("If-Range", ignoreCase = true)) {
-                                header(k, v)
-                            }
-                        }
-                    }
-                    .build()
-                activeResponse = client.newCall(cleanRequest).execute()
-            }
-
             activeResponse.use { resp ->
                 val code = resp.code
                 val isPartial = code == 206
@@ -779,42 +884,54 @@ object OkHttpDownloader {
                     )
                 }
 
-                val contentRange = resp.header("Content-Range")
-                val append = if (isPartial && existingBytes > 0L) {
-                    true
-                } else {
-                    // Server returned HTTP 200 (ignored Range request) or restarted cleanly:
-                    if (existingBytes > 0L) {
-                        tempFile.delete()
-                        existingBytes = 0L
-                    }
-                    false
+                val rangeInfo = if (isPartial) {
+                    parsedContentRange ?: parseContentRangeHeader(resp.header("Content-Range"))
+                } else null
+                if (isPartial && (rangeInfo == null || rangeInfo.start != existingBytes)) {
+                    tempFile.delete()
+                    metaFile.delete()
+                    return@withContext DownloadResult(
+                        file = null,
+                        isSuccessful = false,
+                        statusCode = code,
+                        bytesDownloaded = 0L,
+                        totalBytes = -1L,
+                        errorMessage = "HTTP 206 response did not contain a valid matching Content-Range"
+                    )
                 }
 
-                // Store or update ETag / Last-Modified metadata for next resume attempt
+                val append = isPartial && existingBytes > 0L
+                if (!append && existingBytes > 0L) {
+                    // HTTP 200 means the server restarted the representation. Do not carry
+                    // the previous response's validators into the new file's metadata.
+                    tempFile.delete()
+                    metaFile.delete()
+                    existingBytes = 0L
+                    savedEtag = null
+                    savedLastModified = null
+                }
+
                 val currentEtag = resp.header("ETag")
                 val currentLastModified = resp.header("Last-Modified")
-                if (!currentEtag.isNullOrBlank() || !currentLastModified.isNullOrBlank()) {
+                val validatorEtag = currentEtag?.takeIf { it.isNotBlank() } ?: savedEtag
+                val validatorLastModified = currentLastModified?.takeIf { it.isNotBlank() } ?: savedLastModified
+                if (!validatorEtag.isNullOrBlank() || !validatorLastModified.isNullOrBlank()) {
                     runCatching {
-                        metaFile.writeText("etag=${currentEtag.orEmpty()}\nlast_modified=${currentLastModified.orEmpty()}")
+                        metaFile.writeText(
+                            "etag=${validatorEtag.orEmpty()}\nlast_modified=${validatorLastModified.orEmpty()}"
+                        )
                     }
                 }
 
                 val contentLength = body.contentLength()
                 val totalBytes = if (isPartial) {
-                    val rangeTotal = contentRange?.substringAfterLast('/', "")?.toLongOrNull()
-                    if (rangeTotal != null && rangeTotal > 0L) {
-                        rangeTotal
-                    } else if (contentLength > 0L) {
-                        existingBytes + contentLength
-                    } else {
-                        -1L
-                    }
+                    rangeInfo?.total ?: -1L
                 } else {
                     if (contentLength > 0L) contentLength else -1L
                 }
-
+                val expectedResponseBytes = rangeInfo?.let { it.end - it.start + 1L }
                 var downloaded = if (append) existingBytes else 0L
+                var responseBytes = 0L
 
                 body.byteStream().use { input: InputStream ->
                     FileOutputStream(tempFile, append).use { output ->
@@ -823,10 +940,36 @@ object OkHttpDownloader {
                         while (input.read(buffer).also { bytesRead = it } != -1) {
                             output.write(buffer, 0, bytesRead)
                             downloaded += bytesRead
+                            responseBytes += bytesRead
                             onProgress?.invoke(downloaded, totalBytes)
                         }
                         output.flush()
+                        output.fd.sync()
                     }
+                }
+
+                if (expectedResponseBytes != null && responseBytes != expectedResponseBytes) {
+                    tempFile.delete()
+                    metaFile.delete()
+                    return@withContext DownloadResult(
+                        file = null,
+                        isSuccessful = false,
+                        statusCode = code,
+                        bytesDownloaded = 0L,
+                        totalBytes = totalBytes,
+                        errorMessage = "Response byte count did not match Content-Range"
+                    )
+                }
+
+                if (isPartial && totalBytes <= 0L) {
+                    return@withContext DownloadResult(
+                        file = null,
+                        isSuccessful = false,
+                        statusCode = code,
+                        bytesDownloaded = tempFile.length(),
+                        totalBytes = -1L,
+                        errorMessage = "HTTP 206 response did not provide a verifiable total length"
+                    )
                 }
 
                 // Verify actual downloaded size before committing the file
@@ -991,18 +1134,40 @@ object OkHttpDownloader {
             }
         }
 
-        // Clean up metadata file upon successful completion
-        metaFile.delete()
-
-        val moved = if (tempFile.renameTo(finalFile)) {
+        // Commit only after validation. First try an atomic same-directory rename.
+        // If the filesystem does not support atomic moves, stage and verify the copy first.
+        val moved = try {
+            Files.move(
+                tempFile.toPath(),
+                finalFile.toPath(),
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING
+            )
             true
-        } else {
-            tempFile.copyTo(finalFile, overwrite = true)
-            tempFile.delete()
-            true
+        } catch (_: Exception) {
+            try {
+                val stagingFile = File(finalFile.parentFile, "${finalFile.name}.commit.tmp")
+                stagingFile.delete()
+                tempFile.copyTo(stagingFile, overwrite = true)
+                FileOutputStream(stagingFile, true).use { it.fd.sync() }
+                if (stagingFile.length() != tempFile.length()) {
+                    throw IllegalStateException("Staged download size mismatch")
+                }
+                Files.move(
+                    stagingFile.toPath(),
+                    finalFile.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING
+                )
+                tempFile.delete()
+                true
+            } catch (e: Exception) {
+                Log.e(TAG, "Unable to commit downloaded file ${finalFile.name}", e)
+                false
+            }
         }
 
         if (moved && finalFile.exists() && finalFile.length() > 0L) {
+            metaFile.delete()
             MediaScannerConnection.scanFile(
                 context,
                 arrayOf(finalFile.absolutePath),

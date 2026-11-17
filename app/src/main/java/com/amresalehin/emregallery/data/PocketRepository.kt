@@ -18,7 +18,10 @@ import kotlinx.coroutines.sync.withPermit
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.Locale
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -37,6 +40,7 @@ class PocketRepository(
         if (!exists()) mkdirs()
     }
     private val bookmarksFile: File = File(pocketStorageDir, "bookmarks.json")
+    private val bookmarkLock = Any()
 
     private val _bookmarks = MutableStateFlow<List<MediaInboxStack>>(emptyList())
     val bookmarks: StateFlow<List<MediaInboxStack>> = _bookmarks.asStateFlow()
@@ -375,23 +379,25 @@ class PocketRepository(
     }
 
     private fun updateItemSizeInBookmarks(itemId: String, url: String, sizeBytes: Long) {
-        var changed = false
-        val updatedList = _bookmarks.value.map { stack ->
-            var stackChanged = false
-            val updatedItems = stack.items.map { item ->
-                if ((item.id == itemId || item.sourceUrl == url) && item.sizeBytes != sizeBytes) {
-                    stackChanged = true
-                    item.copy(sizeBytes = sizeBytes)
-                } else item
+        synchronized(bookmarkLock) {
+            var changed = false
+            val latestList = _bookmarks.value.map { stack ->
+                var stackChanged = false
+                val updatedItems = stack.items.map { item ->
+                    if ((item.id == itemId || item.sourceUrl == url) && item.sizeBytes != sizeBytes) {
+                        stackChanged = true
+                        item.copy(sizeBytes = sizeBytes)
+                    } else item
+                }
+                if (stackChanged) {
+                    changed = true
+                    stack.copy(items = updatedItems)
+                } else stack
             }
-            if (stackChanged) {
-                changed = true
-                stack.copy(items = updatedItems)
-            } else stack
-        }
-        if (changed) {
-            _bookmarks.value = updatedList
-            persist()
+            if (changed) {
+                _bookmarks.value = latestList
+                persist()
+            }
         }
     }
 
@@ -545,52 +551,68 @@ class PocketRepository(
     }
 
     private fun persist() {
-        try {
-            val jsonArray = JSONArray()
-            _bookmarks.value.forEach { bookmark ->
-                val obj = JSONObject().apply {
-                    put("id", bookmark.id)
-                    put("title", bookmark.title)
-                    put("sourceDomain", bookmark.sourceDomain)
-                    put("sourceUrl", bookmark.sourceUrl)
-                    put("timestampMillis", bookmark.timestampMillis)
-                    put("description", bookmark.description)
-                    put("previewImageUrl", bookmark.previewImageUrl)
+        synchronized(bookmarkLock) {
+            try {
+                val snapshot = _bookmarks.value
+                val jsonArray = JSONArray()
+                snapshot.forEach { bookmark ->
+                    val obj = JSONObject().apply {
+                        put("id", bookmark.id)
+                        put("title", bookmark.title)
+                        put("sourceDomain", bookmark.sourceDomain)
+                        put("sourceUrl", bookmark.sourceUrl)
+                        put("timestampMillis", bookmark.timestampMillis)
+                        put("description", bookmark.description)
+                        put("previewImageUrl", bookmark.previewImageUrl)
 
-                    val itemsArr = JSONArray()
-                    bookmark.items.forEach { itm ->
-                        val itmObj = JSONObject().apply {
-                            put("id", itm.id)
-                            put("title", itm.title)
-                            put("localUri", itm.localUri)
-                            put("sourceUrl", itm.sourceUrl)
-                            put("isVideo", itm.isVideo)
-                            put("isAudio", itm.isAudio)
-                            put("isStream", itm.isStream)
-                            put("format", itm.format)
-                            put("sizeBytes", itm.sizeBytes)
-                            put("dateAddedMillis", itm.dateAddedMillis)
-                            put("width", itm.width)
-                            put("height", itm.height)
+                        val itemsArr = JSONArray()
+                        bookmark.items.forEach { itm ->
+                            val itmObj = JSONObject().apply {
+                                put("id", itm.id)
+                                put("title", itm.title)
+                                put("localUri", itm.localUri)
+                                put("sourceUrl", itm.sourceUrl)
+                                put("isVideo", itm.isVideo)
+                                put("isAudio", itm.isAudio)
+                                put("isStream", itm.isStream)
+                                put("format", itm.format)
+                                put("sizeBytes", itm.sizeBytes)
+                                put("dateAddedMillis", itm.dateAddedMillis)
+                                put("width", itm.width)
+                                put("height", itm.height)
+                            }
+                            itemsArr.put(itmObj)
                         }
-                        itemsArr.put(itmObj)
+                        put("items", itemsArr)
                     }
-                    put("items", itemsArr)
+                    jsonArray.put(obj)
                 }
-                jsonArray.put(obj)
+
+                if (!pocketStorageDir.exists() && !pocketStorageDir.mkdirs()) {
+                    throw IllegalStateException("Could not create Pocket storage directory")
+                }
+
+                val tmpFile = File(pocketStorageDir, "bookmarks.json.tmp")
+                tmpFile.writeText(jsonArray.toString())
+                try {
+                    Files.move(
+                        tmpFile.toPath(),
+                        bookmarksFile.toPath(),
+                        StandardCopyOption.ATOMIC_MOVE,
+                        StandardCopyOption.REPLACE_EXISTING
+                    )
+                } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+                    Files.move(
+                        tmpFile.toPath(),
+                        bookmarksFile.toPath(),
+                        StandardCopyOption.REPLACE_EXISTING
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error persisting bookmarks to app-private storage", e)
             }
-            if (!pocketStorageDir.exists()) pocketStorageDir.mkdirs()
-            val tmpFile = File(pocketStorageDir, "bookmarks.json.tmp")
-            tmpFile.writeText(jsonArray.toString())
-            if (!tmpFile.renameTo(bookmarksFile)) {
-                bookmarksFile.writeText(jsonArray.toString())
-                tmpFile.delete()
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error persisting bookmarks to app-private storage", e)
         }
     }
-
     /**
      * Adds a bookmark to Pocket.
      * When autoFetchMetadata is true, automatically queries the web page in the background
@@ -684,7 +706,7 @@ class PocketRepository(
         }
 
         val bookmark = MediaInboxStack(
-            id = existingBookmark?.id ?: "bookmark_${System.currentTimeMillis()}",
+            id = existingBookmark?.id ?: "bookmark_${UUID.randomUUID()}",
             title = resolvedTitle,
             sourceDomain = existingBookmark?.sourceDomain?.ifBlank { cleanDomain } ?: cleanDomain,
             sourceUrl = existingBookmark?.sourceUrl ?: cleanUrl,
@@ -702,8 +724,19 @@ class PocketRepository(
                 MediaClassifier.bookmarkDeduplicationKey(existing.sourceUrl) == bookmarkKey
             existing.id != bookmark.id && !isCanonicalDuplicate
         }
-        _bookmarks.value = updated
-        persist()
+        synchronized(bookmarkLock) {
+            // Merge with the latest list at commit time in case another bookmark was saved
+            // while metadata or a scan callback was updating Pocket.
+            val latest = _bookmarks.value
+            val committed = listOf(bookmark) + latest.filter { existing ->
+                existing.id != bookmark.id &&
+                    (bookmarkKey.isBlank() ||
+                        existing.sourceUrl.isBlank() ||
+                        MediaClassifier.bookmarkDeduplicationKey(existing.sourceUrl) != bookmarkKey)
+            }
+            _bookmarks.value = committed
+            persist()
+        }
 
         if (autoFetchMetadata && cleanUrl.isNotBlank()) {
             fetchAndApplyMetadata(bookmark.id, cleanUrl)
@@ -834,7 +867,7 @@ class PocketRepository(
                 }
                 val resolvedItems = if (newCandidates.isNotEmpty()) {
                     val combined = newCandidates + retainedItems
-                    MediaNormalizer.deduplicateMediaInboxItems(combined).take(60)
+                    MediaNormalizer.deduplicateMediaInboxItems(combined)
                 } else {
                     // Preserve existing real media while removing generic site-icon pseudo-items.
                     retainedItems
@@ -883,6 +916,7 @@ class PocketRepository(
     }
 
     private val _activeDeepScanId = MutableStateFlow<String?>(null)
+    @Volatile private var activeDeepScanToken: String? = null
     val activeDeepScanId: StateFlow<String?> = _activeDeepScanId.asStateFlow()
 
     fun isDeepScanning(bookmarkId: String): Boolean = _activeDeepScanId.value == bookmarkId
@@ -895,6 +929,10 @@ class PocketRepository(
         val target = _bookmarks.value.find { it.id == bookmarkId } ?: return
         if (target.sourceUrl.isBlank()) return
 
+        // A generation token prevents an older scan's completion callback from clearing
+        // the visible state of a newer scan, including a restart of the same bookmark.
+        val scanToken = UUID.randomUUID().toString()
+        activeDeepScanToken = scanToken
         _activeDeepScanId.value = bookmarkId
 
         PocketDeepScanEngine.startScan(
@@ -903,35 +941,47 @@ class PocketRepository(
             targetUrl = target.sourceUrl,
             scope = coroutineScope,
             onIncrementalMediaDiscovered = { newCandidates ->
-                val current = _bookmarks.value.find { it.id == bookmarkId } ?: return@startScan
-                val combined = newCandidates + current.items
-                val resolvedItems = MediaNormalizer.deduplicateMediaInboxItems(combined).take(120)
-                val newPreview = if (current.previewImageUrl.isBlank()) {
-                    resolvedItems.firstOrNull { !it.isVideo }?.sourceUrl
-                        ?: resolvedItems.firstOrNull()?.sourceUrl
-                        ?: ""
-                } else current.previewImageUrl
+                synchronized(bookmarkLock) {
+                    if (activeDeepScanToken != scanToken) return@synchronized
+                    val current = _bookmarks.value.find { it.id == bookmarkId } ?: return@synchronized
+                    val combined = newCandidates + current.items
+                    val resolvedItems = MediaNormalizer.deduplicateMediaInboxItems(combined)
+                    val newPreview = if (current.previewImageUrl.isBlank()) {
+                        resolvedItems.firstOrNull { !it.isVideo }?.sourceUrl
+                            ?: resolvedItems.firstOrNull()?.sourceUrl
+                            ?: ""
+                    } else current.previewImageUrl
 
-                val updated = current.copy(
-                    items = resolvedItems,
-                    previewImageUrl = newPreview
-                )
-                _bookmarks.value = _bookmarks.value.map { if (it.id == bookmarkId) updated else it }
+                    val updated = current.copy(
+                        items = resolvedItems,
+                        previewImageUrl = newPreview
+                    )
+                    _bookmarks.value = _bookmarks.value.map { if (it.id == bookmarkId) updated else it }
+                    // Checkpoint each discovered batch so process death cannot erase
+                    // media that has already appeared in Pocket.
+                    persist()
+                }
             },
             onCompleted = {
-                if (_activeDeepScanId.value == bookmarkId) {
-                    _activeDeepScanId.value = null
+                synchronized(bookmarkLock) {
+                    if (activeDeepScanToken == scanToken) {
+                        activeDeepScanToken = null
+                        if (_activeDeepScanId.value == bookmarkId) {
+                            _activeDeepScanId.value = null
+                        }
+                    }
+                    persist()
                 }
-                persist()
             }
         )
     }
 
     /**
-     * Stops the active deep scan immediately and flushes current findings to persistent storage.
+     * Stops the active scan for this bookmark and flushes the latest findings.
      */
     fun stopDeepScan(bookmarkId: String) {
         if (_activeDeepScanId.value == bookmarkId) {
+            activeDeepScanToken = null
             PocketDeepScanEngine.stopScan()
             _activeDeepScanId.value = null
             persist()
@@ -946,24 +996,76 @@ class PocketRepository(
     }
 
     fun updateBookmark(updated: MediaInboxStack) {
-        _bookmarks.value = _bookmarks.value.map { if (it.id == updated.id) updated else it }
-        persist()
+        synchronized(bookmarkLock) {
+            val latest = _bookmarks.value.firstOrNull { it.id == updated.id }
+            // Do not let a metadata refresh or note edit overwrite media discovered or
+            // downloaded by another operation while the UI was holding an older snapshot.
+            val mergedItems = if (latest == null) updated.items else {
+                MediaNormalizer.deduplicateMediaInboxItems(updated.items + latest.items)
+            }
+            _bookmarks.value = _bookmarks.value.map {
+                if (it.id == updated.id) updated.copy(items = mergedItems) else it
+            }
+            persist()
+        }
+    }
+
+    /**
+     * One canonical media download can satisfy the same asset in multiple bookmarks.
+     * Update every matching reference rather than relying on one origin stack ID.
+     */
+    fun updateDownloadedMedia(mediaUrl: String, itemId: String, localUri: String, sizeBytes: Long) {
+        val canonicalKey = MediaClassifier.deduplicationKey(mediaUrl)
+        synchronized(bookmarkLock) {
+            var changed = false
+            _bookmarks.value = _bookmarks.value.map { stack ->
+                var stackChanged = false
+                val items = stack.items.map { item ->
+                    val sameUrl = canonicalKey.isNotBlank() &&
+                        MediaClassifier.deduplicationKey(item.sourceUrl) == canonicalKey
+                    if ((item.id == itemId || sameUrl) &&
+                        (item.localUri != localUri || item.sizeBytes != sizeBytes)
+                    ) {
+                        stackChanged = true
+                        item.copy(localUri = localUri, sizeBytes = sizeBytes)
+                    } else item
+                }
+                val previewMatches = stack.previewImageUrl.isNotBlank() &&
+                    canonicalKey.isNotBlank() &&
+                    MediaClassifier.deduplicationKey(stack.previewImageUrl) == canonicalKey
+                if (stackChanged || previewMatches) {
+                    changed = true
+                    stack.copy(items = items, previewImageUrl = if (previewMatches) localUri else stack.previewImageUrl)
+                } else stack
+            }
+            if (changed) persist()
+        }
     }
 
     fun deleteBookmark(bookmarkId: String) {
-        _bookmarks.value = _bookmarks.value.filter { it.id != bookmarkId }
-        persist()
+        if (_activeDeepScanId.value == bookmarkId) stopDeepScan(bookmarkId)
+        synchronized(bookmarkLock) {
+            _bookmarks.value = _bookmarks.value.filter { it.id != bookmarkId }
+            persist()
+        }
     }
 
     fun deleteBookmarks(bookmarkIds: Set<String>) {
-        _bookmarks.value = _bookmarks.value.filter { it.id !in bookmarkIds }
-        persist()
+        _activeDeepScanId.value?.takeIf { it in bookmarkIds }?.let(::stopDeepScan)
+        synchronized(bookmarkLock) {
+            _bookmarks.value = _bookmarks.value.filter { it.id !in bookmarkIds }
+            persist()
+        }
     }
 
     fun clearAll() {
-        _bookmarks.value = emptyList()
-        prefs.edit().remove(KEY_BOOKMARKS_JSON).apply()
-        runCatching { bookmarksFile.delete() }
+        _activeDeepScanId.value?.let(::stopDeepScan)
+        synchronized(bookmarkLock) {
+            activeDeepScanToken = null
+            _bookmarks.value = emptyList()
+            prefs.edit().remove(KEY_BOOKMARKS_JSON).apply()
+            runCatching { bookmarksFile.delete() }
+        }
     }
 
     companion object {

@@ -17,6 +17,8 @@ import android.media.MediaScannerConnection
 import android.net.Uri
 import org.json.JSONObject
 import java.io.File
+import com.amresalehin.emregallery.ffmpeg.FfmpegKitEngine
+import com.amresalehin.emregallery.ffmpeg.FfprobeMediaInfo
 import kotlin.math.abs
 
 /**
@@ -151,6 +153,11 @@ class MediaDownloadWorker(
                 mediaUrl
             }
 
+            val mediaMode = resolveMediaMode(isVideo = isVideo, isAudio = isAudio, isStream = isStream)
+            val isYouTubeSource = sourceUrl.contains("youtube.com", ignoreCase = true) ||
+                sourceUrl.contains("youtu.be", ignoreCase = true)
+            val requireAudioTrack = isVideo && isYouTubeSource
+
             val effectiveDomain = sourceDomain.takeIf { it.isNotBlank() }
                 ?: OkHttpDownloader.extractDomain(sourceUrl.ifBlank { mediaUrl })
 
@@ -185,7 +192,8 @@ class MediaDownloadWorker(
                     referer = referer ?: sourceUrl,
                     headers = downloadHeaders,
                     cookies = cookieString,
-                    domain = effectiveDomain
+                    domain = effectiveDomain,
+                    mediaMode = mediaMode
                 )
                 // If targetUrl != mediaUrl and extractor returned null, retry with mediaUrl directly
                 if ((downloadedFile == null || !downloadedFile.exists() || downloadedFile.length() == 0L) && targetUrl != mediaUrl) {
@@ -196,7 +204,8 @@ class MediaDownloadWorker(
                         referer = referer ?: sourceUrl,
                         headers = downloadHeaders,
                         cookies = cookieString,
-                        domain = effectiveDomain
+                        domain = effectiveDomain,
+                        mediaMode = mediaMode
                     )
                 }
             }
@@ -225,6 +234,27 @@ class MediaDownloadWorker(
                 return@withContext Result.failure()
             }
 
+            // A non-empty file is not necessarily playable media. Probe every video/audio
+            // output and reject missing tracks before it can be marked FINISHED.
+            val candidateFile = downloadedFile
+            if (candidateFile != null && candidateFile.exists() && candidateFile.length() > 0L &&
+                (isVideo || isAudio || isStream)
+            ) {
+                val mediaInfo = FfmpegKitEngine.probeMedia(candidateFile.absolutePath, context = applicationContext)
+                val validationError = validateMediaStreams(
+                    isVideo = isVideo,
+                    isAudio = isAudio,
+                    isStream = isStream,
+                    requireAudioWithVideo = requireAudioTrack,
+                    mediaInfo = mediaInfo
+                )
+                if (validationError != null) {
+                    errorDiagnostic = validationError
+                    runCatching { candidateFile.delete() }
+                    downloadedFile = null
+                }
+            }
+
             if (downloadedFile != null && downloadedFile.exists() && downloadedFile.length() > 0L) {
                 setProgress(workDataOf(KEY_PROGRESS to 1.0f, KEY_STATUS to "Saved successfully"))
 
@@ -244,21 +274,14 @@ class MediaDownloadWorker(
                     sizeBytes = downloadedFile.length()
                 )
 
-                // If this download belongs to a Pocket bookmark, update its localUri as well
+                // One canonical downloaded asset may be referenced by multiple Pocket bookmarks.
                 runCatching {
-                    val pocketRepo = PocketRepository.getInstance(applicationContext)
-                    val stack = pocketRepo.bookmarks.value.firstOrNull { it.id == stackId }
-                    if (stack != null) {
-                        val updatedItems = stack.items.map { itm ->
-                            if (itm.id == itemId || (itm.sourceUrl.isNotBlank() && itm.sourceUrl == mediaUrl)) {
-                                itm.copy(localUri = fileUri, sizeBytes = downloadedFile.length())
-                            } else itm
-                        }
-                        val updatedPreview = if (stack.previewImageUrl == mediaUrl || stack.previewImageUrl.isBlank()) {
-                            fileUri
-                        } else stack.previewImageUrl
-                        pocketRepo.updateBookmark(stack.copy(items = updatedItems, previewImageUrl = updatedPreview))
-                    }
+                    PocketRepository.getInstance(applicationContext).updateDownloadedMedia(
+                        mediaUrl = mediaUrl,
+                        itemId = itemId,
+                        localUri = fileUri,
+                        sizeBytes = downloadedFile.length()
+                    )
                 }
 
                 Result.success(
@@ -306,11 +329,50 @@ class MediaDownloadWorker(
             }
             Result.failure(workDataOf(KEY_ERROR to err))
         } finally {
-            DownloadQueueManager.markDownloadCompleted(itemId)
+            DownloadQueueManager.markDownloadCompleted(itemId = itemId, workId = id)
         }
     }
 
     companion object {
+        internal fun resolveMediaMode(isVideo: Boolean, isAudio: Boolean, isStream: Boolean): String {
+            return when {
+                isAudio && !isVideo -> "audio"
+                isStream -> "best"
+                isVideo -> "video"
+                else -> "best"
+            }
+        }
+
+        internal fun validateMediaStreams(
+            isVideo: Boolean,
+            isAudio: Boolean,
+            isStream: Boolean,
+            requireAudioWithVideo: Boolean,
+            mediaInfo: FfprobeMediaInfo?
+        ): String? {
+            if (!isVideo && !isAudio && !isStream) return null
+            val info = mediaInfo ?: return "Downloaded media could not be inspected by FFprobe"
+            val hasVideo = !info.videoCodec.isNullOrBlank()
+            val hasAudio = !info.audioCodec.isNullOrBlank()
+
+            // HLS/DASH is a container/transport category, not proof that the stream
+            // contains video. An audio-only playlist is still a valid stream download.
+            if (isVideo && !isStream && !hasVideo) {
+                return "Downloaded file does not contain a valid video track"
+            }
+            if (isAudio && !hasAudio) return "Downloaded file does not contain a valid audio track"
+            if (isVideo && isAudio && (!hasVideo || !hasAudio)) {
+                return "Downloaded file is missing the requested audio or video track"
+            }
+            if (isVideo && requireAudioWithVideo && !hasAudio) {
+                return "Video download is missing its expected audio track"
+            }
+            if (isStream && !hasVideo && !hasAudio) {
+                return "Downloaded stream contains neither a valid video nor audio track"
+            }
+            return null
+        }
+
         const val TAG = "MediaDownloadWorker"
         const val WORK_TAG_DOWNLOAD = "media_download"
 

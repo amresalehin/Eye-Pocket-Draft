@@ -393,15 +393,25 @@ object GalleryDlEngine {
         referer: String? = null,
         headers: Map<String, String>? = null,
         cookies: String? = null,
-        domain: String? = null
+        domain: String? = null,
+        mediaMode: String = "best"
     ): File? = withContext(Dispatchers.IO) {
+        var stagingFile: File? = null
         try {
             val effectiveDomain = domain?.replace(Regex("[^a-zA-Z0-9.-]"), "_")?.trim()?.takeIf { it.isNotBlank() }
                 ?: OkHttpDownloader.extractDomain(referer ?: mediaUrl)
             val dir = OkHttpDownloader.getTargetStorageDir(context, effectiveDomain)
 
             val sanitizedName = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
-            val targetFile = File(dir, "${System.currentTimeMillis()}_$sanitizedName")
+            val stableName = OkHttpDownloader.stableDownloadBaseName(mediaUrl, sanitizedName, null)
+            val extension = stableName.substringAfterLast('.', "").takeIf { it.isNotBlank() }
+            val baseName = stableName.substringBeforeLast('.', stableName)
+            val stagingName = if (extension != null) "$baseName.staging.$extension" else "$stableName.staging"
+            val targetFile = File(dir, stableName)
+            val stagingOutputFile = File(dir, stagingName)
+            stagingFile = stagingOutputFile
+            stagingOutputFile.delete()
+            File(dir, stagingOutputFile.name + ".part").delete()
 
             val userAgent = headers?.get("User-Agent") ?: BotDetectionMitigator.STEALTH_USER_AGENT
             val effectiveCookies = cookies ?: headers?.get("Cookie")
@@ -418,32 +428,60 @@ object GalleryDlEngine {
             if (isAvailable()) {
                 val py = Python.getInstance()
                 val runner = py.getModule("gallery_dl_runner")
+                val normalizedMode = mediaMode.lowercase().takeIf {
+                    it == "audio" || it == "video"
+                } ?: "best"
                 val success = runner.callAttr(
                     "download_media_file",
                     mediaUrl,
-                    targetFile.absolutePath,
+                    stagingOutputFile.absolutePath,
                     referer ?: "",
                     userAgent,
                     effectiveCookies ?: "",
-                    headersJson
+                    headersJson,
+                    normalizedMode
                 ).toBoolean()
 
-                if (success && targetFile.exists() && targetFile.length() > 0L) {
-                    android.media.MediaScannerConnection.scanFile(
-                        context,
-                        arrayOf(targetFile.absolutePath),
-                        null,
-                        null
-                    )
-                    return@withContext targetFile
+                if (success && stagingOutputFile.exists() && stagingOutputFile.length() > 0L) {
+                    try {
+                        java.nio.file.Files.move(
+                            stagingOutputFile.toPath(),
+                            targetFile.toPath(),
+                            java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                            java.nio.file.StandardCopyOption.REPLACE_EXISTING
+                        )
+                    } catch (_: Exception) {
+                        val commitSuffix = if (extension != null) ".$extension" else ""
+                        val commitFile = File(dir, baseName + ".commit" + commitSuffix)
+                        commitFile.delete()
+                        stagingOutputFile.copyTo(commitFile, overwrite = true)
+                        if (commitFile.length() != stagingOutputFile.length()) {
+                            commitFile.delete()
+                            throw IllegalStateException("Extractor output staging copy was incomplete")
+                        }
+                        java.nio.file.Files.move(
+                            commitFile.toPath(),
+                            targetFile.toPath(),
+                            java.nio.file.StandardCopyOption.REPLACE_EXISTING
+                        )
+                        stagingOutputFile.delete()
+                    }
+
+                    if (targetFile.exists() && targetFile.length() > 0L) {
+                        return@withContext targetFile
+                    }
                 }
             }
 
-            // Exclusively handled by yt-dlp & gallery-dl. Return null if both failed.
             null
         } catch (e: Exception) {
-            Log.e(TAG, "downloadMedia failed", e)
+            Log.e(TAG, "downloadMedia failed for $mediaUrl", e)
             null
+        } finally {
+            stagingFile?.let { file ->
+                runCatching { file.delete() }
+                runCatching { File(file.parentFile, file.name + ".part").delete() }
+            }
         }
     }
 

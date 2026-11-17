@@ -16,13 +16,13 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
-import java.lang.ref.WeakReference
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -37,20 +37,23 @@ object PocketDeepScanEngine {
     private const val SCROLL_CADENCE_MS = 1_000L
     private const val EARLY_EXIT_CONSECUTIVE_EMPTY = 4
 
-    private val isScanning = AtomicBoolean(false)
-    private var scanJob: Job? = null
-    private var activeWebViewRef: WeakReference<WebView>? = null
-    private var currentBookmarkId: String? = null
-
-    fun isScanning(bookmarkId: String? = null): Boolean {
-        return if (bookmarkId == null) {
-            isScanning.get()
-        } else {
-            isScanning.get() && currentBookmarkId == bookmarkId
-        }
+    private class ScanSession(val bookmarkId: String) {
+        @Volatile var webView: WebView? = null
+        @Volatile var job: Job? = null
+        val webViewDestroyed = AtomicBoolean(false)
     }
 
-    fun getActiveBookmarkId(): String? = if (isScanning.get()) currentBookmarkId else null
+    private val isScanning = AtomicBoolean(false)
+
+    @Volatile
+    private var activeSession: ScanSession? = null
+
+    fun isScanning(bookmarkId: String? = null): Boolean {
+        val session = activeSession ?: return false
+        return isScanning.get() && (bookmarkId == null || session.bookmarkId == bookmarkId)
+    }
+
+    fun getActiveBookmarkId(): String? = activeSession?.bookmarkId
 
     /**
      * Starts an on-demand hardware-accelerated deep scan for the given bookmark URL.
@@ -64,7 +67,7 @@ object PocketDeepScanEngine {
         onIncrementalMediaDiscovered: (List<MediaInboxItem>) -> Unit,
         onCompleted: () -> Unit
     ) {
-        // Stop any previous active scan before initiating a new one
+        // There is one WebView scan slot. Cancel the previous session before taking ownership.
         stopScan()
 
         if (targetUrl.isBlank()) {
@@ -72,34 +75,41 @@ object PocketDeepScanEngine {
             return
         }
 
+        val session = ScanSession(bookmarkId)
+        activeSession = session
         isScanning.set(true)
-        currentBookmarkId = bookmarkId
 
-        scanJob = scope.launch(Dispatchers.Main) {
+        session.job = scope.launch(Dispatchers.Main) {
             val appContext = context.applicationContext
-            var webView: WebView? = null
             val seenUrls = mutableSetOf<String>()
             var consecutiveEmptyCount = 0
             val startTime = System.currentTimeMillis()
 
             try {
-                webView = createHardwareAcceleratedWebView(appContext, targetUrl)
-                activeWebViewRef = WeakReference(webView)
+                if (!isActive || activeSession !== session) return@launch
 
-                // Load target page
+                val webView = createHardwareAcceleratedWebView(appContext, targetUrl, session)
+                session.webView = webView
+
+                // stopScan() can race with WebView creation from another thread.
+                if (!isActive || activeSession !== session) {
+                    destroySessionWebView(session)
+                    return@launch
+                }
+
                 webView.loadUrl(targetUrl)
 
                 // Allow initial DOM load and hydrate
                 delay(1_500L)
 
-                while (isActive && isScanning.get()) {
+                while (isActive && isScanning.get() && activeSession === session) {
                     val elapsed = System.currentTimeMillis() - startTime
                     if (elapsed >= MAX_SCAN_DURATION_MS) {
                         Log.d(TAG, "Deep scan reached 30s maximum duration for $targetUrl. Auto-stopping.")
                         break
                     }
 
-                    val currentWv = webView ?: break
+                    val currentWv = session.webView ?: break
 
                     // Active 30% RAM protection: enforce memory limit to prevent app freezes & renderer crashes
                     if (RamGovernor.isHeapLimitExceeded()) {
@@ -138,11 +148,14 @@ object PocketDeepScanEngine {
                     if (newItems.isNotEmpty()) {
                         consecutiveEmptyCount = 0
                         withContext(Dispatchers.Default) {
-                            onIncrementalMediaDiscovered(newItems)
+                            // Do not publish stale discoveries after a newer scan has taken ownership.
+                            if (activeSession === session) {
+                                onIncrementalMediaDiscovered(newItems)
+                            }
                         }
                     } else {
                         consecutiveEmptyCount++
-                        // If 4 consecutive scrolls after at least 8 seconds yield zero new media, exit early
+                        // Preserve the existing bounded early-exit behavior.
                         if (elapsed >= 8_000L && consecutiveEmptyCount >= EARLY_EXIT_CONSECUTIVE_EMPTY) {
                             Log.d(TAG, "Early exit triggered: No new media after $consecutiveEmptyCount scrolls.")
                             break
@@ -151,16 +164,21 @@ object PocketDeepScanEngine {
 
                     delay(SCROLL_CADENCE_MS)
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // Expected when the user stops the scan or starts another bookmark's scan.
+                throw e
             } catch (e: Exception) {
                 Log.w(TAG, "Deep scan encountered an exception for $targetUrl", e)
             } finally {
-                withContext(Dispatchers.Main) {
-                    destroyWebView(webView)
-                    activeWebViewRef = null
+                withContext(NonCancellable + Dispatchers.Main) {
+                    destroySessionWebView(session)
+                    // A cancelled session must never clear or overwrite a newer session's state.
+                    if (activeSession === session) {
+                        activeSession = null
+                        isScanning.set(false)
+                    }
                 }
-                isScanning.set(false)
-                currentBookmarkId = null
-                withContext(Dispatchers.Default) {
+                withContext(NonCancellable + Dispatchers.Default) {
                     onCompleted()
                 }
             }
@@ -168,27 +186,38 @@ object PocketDeepScanEngine {
     }
 
     /**
-     * Instantly stops an ongoing deep scan, releasing the WebView immediately.
+     * Stops only the current session and releases its own WebView. A cancelled session's
+     * finally block is not allowed to clear a subsequent scan's state.
      */
     fun stopScan() {
-        if (!isScanning.getAndSet(false)) {
-            return
-        }
-        currentBookmarkId = null
-        scanJob?.cancel()
-        scanJob = null
+        stopScan(expectedSession = null)
+    }
 
-        Handler(Looper.getMainLooper()).post {
-            val wv = activeWebViewRef?.get()
-            if (wv != null) {
-                destroyWebView(wv)
+    private fun stopScan(expectedSession: ScanSession?) {
+        val session = activeSession
+        // A callback from an older WebView must never stop a newer scan session.
+        if (expectedSession != null && session !== expectedSession) return
+        activeSession = null
+        isScanning.set(false)
+        session?.job?.cancel()
+        if (session != null) {
+            Handler(Looper.getMainLooper()).post {
+                destroySessionWebView(session)
             }
-            activeWebViewRef = null
         }
     }
 
+    private fun destroySessionWebView(session: ScanSession) {
+        // stopScan() can run before the coroutine has finished constructing its WebView.
+        // Do not mark the session as destroyed until an actual WebView is available.
+        val webView = session.webView ?: return
+        if (!session.webViewDestroyed.compareAndSet(false, true)) return
+        session.webView = null
+        destroyWebView(webView)
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
-    private fun createHardwareAcceleratedWebView(context: Context, initialUrl: String): WebView {
+    private fun createHardwareAcceleratedWebView(context: Context, initialUrl: String, session: ScanSession): WebView {
         return WebView(context).apply {
             // Software layer for background DOM scraping avoids missing GPU rendernode crashes in emulators
             layoutParams = ViewGroup.LayoutParams(1080, 1920)
@@ -232,7 +261,7 @@ object PocketDeepScanEngine {
                     detail: RenderProcessGoneDetail?
                 ): Boolean {
                     Log.w(TAG, "Deep scan WebView renderer process gone (didCrash=${detail?.didCrash()}). Cleanly terminating scan.")
-                    stopScan()
+                    stopScan(expectedSession = session)
                     return true
                 }
             }

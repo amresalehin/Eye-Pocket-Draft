@@ -2,6 +2,8 @@ package com.amresalehin.emregallery
 
 import com.amresalehin.emregallery.data.BrowserTabSession
 import com.amresalehin.emregallery.data.MediaCategory
+import com.amresalehin.emregallery.data.MediaInboxItem
+import com.amresalehin.emregallery.data.MediaNormalizer
 import com.amresalehin.emregallery.data.MediaClassifier
 import com.amresalehin.emregallery.data.MediaProvenance
 import com.amresalehin.emregallery.data.ScrapedMediaItem
@@ -13,6 +15,39 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MediaDeduplicationPureUnitTest {
+
+    @Test
+    fun deduplicationKeepsDownloadedLocalCopyWhenHigherQualityRemoteVariantWins() {
+        val localCopy = MediaInboxItem(
+            id = "saved-copy",
+            title = "Photo",
+            localUri = "/storage/emulated/0/Download/photo.jpg",
+            sourceUrl = "https://cdn.example.com/photo.jpg?utm_source=bookmark",
+            isVideo = false,
+            format = "JPEG",
+            sizeBytes = 400_000L,
+            width = 600,
+            height = 400
+        )
+        val bestRemote = MediaInboxItem(
+            id = "best-source",
+            title = "Photo",
+            localUri = "",
+            sourceUrl = "https://cdn.example.com/photo.jpg?utm_medium=feed",
+            isVideo = false,
+            format = "JPEG",
+            sizeBytes = 900_000L,
+            width = 1600,
+            height = 1000
+        )
+
+        val result = MediaNormalizer.deduplicateMediaInboxItems(listOf(localCopy, bestRemote))
+        assertEquals(1, result.size)
+        assertEquals("best-source", result.single().id)
+        assertEquals(bestRemote.sourceUrl, result.single().sourceUrl)
+        assertEquals(localCopy.localUri, result.single().localUri)
+        assertEquals(900_000L, result.single().sizeBytes)
+    }
 
     @Test
     fun browserTabMediaCountResetsWhenNavigatingToAnotherPage() {

@@ -11,6 +11,8 @@ import com.amresalehin.emregallery.data.MediaInboxItem
 import com.amresalehin.emregallery.data.MediaInboxStack
 import com.amresalehin.emregallery.data.MediaProvenance
 import com.amresalehin.emregallery.data.OkHttpDownloader
+import com.amresalehin.emregallery.data.MediaDownloadWorker
+import com.amresalehin.emregallery.ffmpeg.FfprobeMediaInfo
 import com.amresalehin.emregallery.data.ScrapedMediaItem
 import com.amresalehin.emregallery.data.ScrapeResult
 import com.amresalehin.emregallery.ui.Destination
@@ -26,6 +28,7 @@ import okio.Buffer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -37,6 +40,157 @@ import java.io.File
 @RunWith(RobolectricTestRunner::class)
 @Config
 class MediaDownloaderTest {
+
+    @Test
+    fun downloadIdentityUsesCanonicalUrlInsteadOfCallerId() {
+        val first = OkHttpDownloader.stableDownloadBaseName(
+            "https://cdn.example.com/a/video.mp4?token=one",
+            "video.mp4",
+            "same-item-id"
+        )
+        val second = OkHttpDownloader.stableDownloadBaseName(
+            "https://cdn.example.com/b/video.mp4?token=two",
+            "video.mp4",
+            "same-item-id"
+        )
+        assertNotEquals("Different URLs must never share partial download files", first, second)
+
+        val sameAssetFromAnotherBookmark = OkHttpDownloader.stableDownloadBaseName(
+            "https://cdn.example.com/a/video.mp4?token=one",
+            "video.mp4",
+            "different-bookmark-item-id"
+        )
+        assertEquals("One canonical URL must use one file identity across bookmarks", first, sameAssetFromAnotherBookmark)
+    }
+
+    @Test
+    fun contentRangeParserRejectsMissingOrMalformedHeaders() {
+        val valid = OkHttpDownloader.parseContentRangeHeader("bytes 5-9/10")
+        assertNotNull(valid)
+        assertEquals(5L, valid?.start)
+        assertEquals(9L, valid?.end)
+        assertEquals(10L, valid?.total)
+
+        assertNull(OkHttpDownloader.parseContentRangeHeader(null))
+        val unknownTotal = OkHttpDownloader.parseContentRangeHeader("bytes 5-9/*")
+        assertNotNull("A wildcard total is syntactically valid but not committable", unknownTotal)
+        assertNull(unknownTotal?.total)
+        assertNull(OkHttpDownloader.parseContentRangeHeader("bytes 9-5/10"))
+        assertNull(OkHttpDownloader.parseContentRangeHeader("bytes 5-10/10"))
+        assertNull(OkHttpDownloader.parseContentRangeHeader("5-9/10"))
+    }
+
+    @Test
+    fun workerPreservesAudioOnlyAndRequiresYoutubeVideoAudioTrack() {
+        assertEquals("audio", MediaDownloadWorker.resolveMediaMode(isVideo = false, isAudio = true, isStream = false))
+        assertEquals("video", MediaDownloadWorker.resolveMediaMode(isVideo = true, isAudio = false, isStream = false))
+        assertEquals("video", MediaDownloadWorker.resolveMediaMode(isVideo = false, isAudio = false, isStream = true))
+        assertEquals("best", MediaDownloadWorker.resolveMediaMode(isVideo = false, isAudio = false, isStream = false))
+
+        val videoOnly = FfprobeMediaInfo(
+            format = "mp4",
+            durationSeconds = 12.0,
+            sizeBytes = 1024L,
+            bitrateKbps = 700L,
+            videoCodec = "H264",
+            resolution = "1280x720",
+            frameRate = 30.0,
+            audioCodec = null,
+            audioChannels = null,
+            sampleRateHz = null,
+            streamCount = 1,
+            rawMetadata = emptyMap()
+        )
+        val muxed = videoOnly.copy(
+            audioCodec = "AAC",
+            audioChannels = 2,
+            sampleRateHz = 48000,
+            streamCount = 2
+        )
+
+        assertNull(
+            MediaDownloadWorker.validateMediaStreams(
+                isVideo = true,
+                isAudio = false,
+                isStream = false,
+                requireAudioWithVideo = false,
+                mediaInfo = videoOnly
+            )
+        )
+        assertTrue(
+            MediaDownloadWorker.validateMediaStreams(
+                isVideo = true,
+                isAudio = false,
+                isStream = false,
+                requireAudioWithVideo = true,
+                mediaInfo = videoOnly
+            )?.contains("audio track") == true
+        )
+        assertNull(
+            MediaDownloadWorker.validateMediaStreams(
+                isVideo = true,
+                isAudio = false,
+                isStream = false,
+                requireAudioWithVideo = true,
+                mediaInfo = muxed
+            )
+        )
+        assertTrue(
+            MediaDownloadWorker.validateMediaStreams(
+                isVideo = false,
+                isAudio = true,
+                isStream = false,
+                requireAudioWithVideo = false,
+                mediaInfo = videoOnly
+            )?.contains("audio track") == true
+        )
+
+        val audioOnlyStream = videoOnly.copy(
+            videoCodec = null,
+            resolution = null,
+            audioCodec = "AAC",
+            audioChannels = 2,
+            sampleRateHz = 48000
+        )
+        assertNull(
+            "An audio-only HLS/DASH stream is valid even when the DOM model also has isVideo=true",
+            MediaDownloadWorker.validateMediaStreams(
+                isVideo = true,
+                isAudio = false,
+                isStream = true,
+                requireAudioWithVideo = false,
+                mediaInfo = audioOnlyStream
+            )
+        )
+    }
+
+    @Test
+    fun mockWebServerRejects206WithoutContentRange() = runBlocking {
+        val server = MockWebServer()
+        server.start()
+        try {
+            val context: Context = ApplicationProvider.getApplicationContext()
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(206)
+                    .setHeader("Content-Type", "video/mp4")
+                    .setBody(Buffer().write(ByteArray(8) { 0x22.toByte() }))
+            )
+
+            val url = server.url("/video.mp4").toString()
+            val result = OkHttpDownloader.downloadMediaFileDetailed(
+                context = context,
+                mediaUrl = url,
+                fileName = "video.mp4",
+                downloadId = "invalid_range_test"
+            )
+            assertFalse("206 without Content-Range must not be committed", result.isSuccessful)
+            assertNull(result.file)
+            assertTrue(result.errorMessage?.contains("Content-Range") == true)
+        } finally {
+            server.shutdown()
+        }
+    }
 
     @Test
     fun destinationEnumContainsMediaInbox() {
@@ -528,8 +682,12 @@ class MediaDownloaderTest {
         try {
             val context: Context = ApplicationProvider.getApplicationContext()
             val downloadId = "test_resumable_video"
+            val url = server.url("/video.mp4").toString()
+            val baseName = OkHttpDownloader.stableDownloadBaseName(url, "video.mp4", downloadId)
             val targetDir = OkHttpDownloader.getTargetStorageDir(context)
-            val tempFile = File(targetDir, "$downloadId.mp4.downloading")
+            val tempFile = File(targetDir, "$baseName.downloading")
+            val metaFile = File(targetDir, "$baseName.meta")
+            metaFile.writeText("etag=test-etag\nlast_modified=")
             tempFile.writeBytes(ByteArray(5) { 0x41.toByte() })
 
             server.enqueue(
@@ -541,7 +699,6 @@ class MediaDownloaderTest {
                     .setBody(Buffer().write(ByteArray(5) { 0x42.toByte() }))
             )
 
-            val url = server.url("/video.mp4").toString()
             val result = OkHttpDownloader.downloadMediaFileDetailed(
                 context = context,
                 mediaUrl = url,
@@ -568,8 +725,12 @@ class MediaDownloaderTest {
         try {
             val context: Context = ApplicationProvider.getApplicationContext()
             val downloadId = "test_fallback_video"
+            val url = server.url("/video.mp4").toString()
+            val baseName = OkHttpDownloader.stableDownloadBaseName(url, "video.mp4", downloadId)
             val targetDir = OkHttpDownloader.getTargetStorageDir(context)
-            val tempFile = File(targetDir, "$downloadId.mp4.downloading")
+            val tempFile = File(targetDir, "$baseName.downloading")
+            val metaFile = File(targetDir, "$baseName.meta")
+            metaFile.writeText("etag=test-etag\nlast_modified=")
             tempFile.writeBytes(ByteArray(8) { 0x55.toByte() })
 
             // Server ignores Range and returns HTTP 200 with full 10 bytes
@@ -581,7 +742,6 @@ class MediaDownloaderTest {
                     .setHeader("Content-Length", "10")
             )
 
-            val url = server.url("/video.mp4").toString()
             val result = OkHttpDownloader.downloadMediaFileDetailed(
                 context = context,
                 mediaUrl = url,
@@ -606,8 +766,12 @@ class MediaDownloaderTest {
         try {
             val context: Context = ApplicationProvider.getApplicationContext()
             val downloadId = "test_416_video"
+            val url = server.url("/video.mp4").toString()
+            val baseName = OkHttpDownloader.stableDownloadBaseName(url, "video.mp4", downloadId)
             val targetDir = OkHttpDownloader.getTargetStorageDir(context)
-            val tempFile = File(targetDir, "$downloadId.mp4.downloading")
+            val tempFile = File(targetDir, "$baseName.downloading")
+            val metaFile = File(targetDir, "$baseName.meta")
+            metaFile.writeText("etag=test-etag\nlast_modified=")
             tempFile.writeBytes(ByteArray(50) { 0x11.toByte() })
 
             // First request with Range fails with 416
@@ -625,7 +789,6 @@ class MediaDownloaderTest {
                     .setHeader("Content-Length", "10")
             )
 
-            val url = server.url("/video.mp4").toString()
             val result = OkHttpDownloader.downloadMediaFileDetailed(
                 context = context,
                 mediaUrl = url,
@@ -913,8 +1076,12 @@ class MediaDownloaderTest {
         try {
             val context: Context = ApplicationProvider.getApplicationContext()
             val downloadId = "test_mismatch_resume"
+            val url = server.url("/video.mp4").toString()
+            val baseName = OkHttpDownloader.stableDownloadBaseName(url, "video.mp4", downloadId)
             val targetDir = OkHttpDownloader.getTargetStorageDir(context)
-            val tempFile = File(targetDir, "$downloadId.mp4.downloading")
+            val tempFile = File(targetDir, "$baseName.downloading")
+            val metaFile = File(targetDir, "$baseName.meta")
+            metaFile.writeText("etag=test-etag\nlast_modified=")
             // Local file has 10 bytes
             tempFile.writeBytes(ByteArray(10) { 0x11.toByte() })
 
@@ -935,7 +1102,6 @@ class MediaDownloaderTest {
                     .setHeader("Content-Length", "20")
             )
 
-            val url = server.url("/video.mp4").toString()
             val result = OkHttpDownloader.downloadMediaFileDetailed(
                 context = context,
                 mediaUrl = url,
@@ -959,8 +1125,12 @@ class MediaDownloaderTest {
         try {
             val context: Context = ApplicationProvider.getApplicationContext()
             val downloadId = "test_416_complete"
+            val url = server.url("/video.mp4").toString()
+            val baseName = OkHttpDownloader.stableDownloadBaseName(url, "video.mp4", downloadId)
             val targetDir = OkHttpDownloader.getTargetStorageDir(context)
-            val tempFile = File(targetDir, "$downloadId.mp4.downloading")
+            val tempFile = File(targetDir, "$baseName.downloading")
+            val metaFile = File(targetDir, "$baseName.meta")
+            metaFile.writeText("etag=test-etag\nlast_modified=")
             // Local file has full 30 bytes
             tempFile.writeBytes(ByteArray(30) { 0x44.toByte() })
 
@@ -971,7 +1141,6 @@ class MediaDownloaderTest {
                     .setHeader("Content-Range", "bytes */30")
             )
 
-            val url = server.url("/video.mp4").toString()
             val result = OkHttpDownloader.downloadMediaFileDetailed(
                 context = context,
                 mediaUrl = url,
