@@ -999,7 +999,9 @@ fun PocketBookmarkStaggeredCard(
     }
 
     val firstMedia = stack.items.firstOrNull { item ->
-        !item.sourceUrl.contains("google.com/s2/favicons", ignoreCase = true)
+        !item.isVideo && !item.isAudio && !item.isStream &&
+            !MediaClassifier.isSvg(item.sourceUrl, format = item.format) &&
+            !item.sourceUrl.contains("google.com/s2/favicons", ignoreCase = true)
     }
     val mediaModel = remember(firstMedia, stack.previewImageUrl) {
         // A bookmark's actual Open Graph preview is its primary visual identity.
