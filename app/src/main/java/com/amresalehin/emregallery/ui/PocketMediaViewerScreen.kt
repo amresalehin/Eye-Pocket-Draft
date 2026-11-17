@@ -641,13 +641,21 @@ private fun executeSaveMedia(
             downloadUrl.contains(".webp", ignoreCase = true) -> "webp"
             else -> "jpg"
         }
-        val safeBaseName = (item.title.ifBlank { stack.title.ifBlank { "media_${System.currentTimeMillis()}" } })
+        val safeBaseName = (item.title.ifBlank { stack.title.ifBlank { "media" } })
             .replace(Regex("[^a-zA-Z0-9._-]"), "_").take(40)
-        val fileName = if (safeBaseName.endsWith(".$ext", ignoreCase = true)) safeBaseName else "${safeBaseName}.$ext"
+        val requestedFileName = if (safeBaseName.endsWith(".$ext", ignoreCase = true)) safeBaseName else "${safeBaseName}.$ext"
 
-        val itemId = item.id.ifBlank { "pocket_dl_${abs((downloadUrl + System.currentTimeMillis()).hashCode())}" }
-        val displayTitle = item.title.ifBlank { stack.title.ifBlank { fileName } }
+        val itemId = item.id.ifBlank { "pocket_dl_${abs(downloadUrl.hashCode())}" }
+        val displayTitle = item.title.ifBlank { stack.title.ifBlank { requestedFileName } }
         val isStreamUrl = item.isStream || downloadUrl.contains(".m3u8", ignoreCase = true) || downloadUrl.contains(".mpd", ignoreCase = true)
+        val sourcePageUrl = stack.sourceUrl.ifBlank { downloadUrl }
+        val youtubeVideoId = com.amresalehin.emregallery.data.MediaClassifier.extractYouTubeVideoId(sourcePageUrl)
+            ?: com.amresalehin.emregallery.data.MediaClassifier.extractYouTubeVideoId(downloadUrl)
+        val stableMediaIdentity = youtubeVideoId?.let { "youtube:$it" } ?: downloadUrl
+        val requiresAudio = item.requiresAudio || (
+            item.isVideo && GalleryDlEngine.checkSupport(sourcePageUrl).extractorEngine == "yt-dlp"
+        )
+        val fileName = OkHttpDownloader.generateStableMediaFileName(stableMediaIdentity, requestedFileName)
         val thumb = if (item.localUri.isNotBlank()) item.localUri else (item.sourceUrl.ifBlank { stack.previewImageUrl })
         val effectiveDomain = stack.sourceDomain.ifBlank { OkHttpDownloader.extractDomain(stack.sourceUrl.ifBlank { downloadUrl }) }
 
@@ -674,6 +682,12 @@ private fun executeSaveMedia(
             val destFile = File(targetDir, fileName)
             val copied = withContext(Dispatchers.IO) {
                 runCatching {
+                    if (!validateSavedMediaTracks(
+                            localFile,
+                            requireVideo = item.isVideo && !item.isAudio,
+                            requireAudio = item.isAudio || requiresAudio
+                        )
+                    ) return@runCatching false
                     localFile.copyTo(destFile, overwrite = true)
                     MediaScannerConnection.scanFile(
                         context,
@@ -701,12 +715,17 @@ private fun executeSaveMedia(
         if (isStreamUrl) {
             DownloadActivityManager.updateProgress(itemId, 0.25f, 0L, 0L, 0L)
             val mp4FileName = if (fileName.endsWith(".mp4", ignoreCase = true)) fileName else "${fileName.substringBeforeLast('.')}.mp4"
-            val targetFile = File(targetDir, mp4FileName)
+            val targetFile = File(
+                targetDir,
+                OkHttpDownloader.generateStableMediaFileName(stableMediaIdentity, mp4FileName)
+            )
             val remuxResult = withContext(Dispatchers.IO) {
                 com.amresalehin.emregallery.ffmpeg.FfmpegKitEngine.remuxStream(
                     streamUrl = downloadUrl,
                     outputFile = targetFile,
-                    context = context
+                    context = context,
+                    requireVideo = item.isVideo && !item.isAudio,
+                    requireAudio = item.isAudio || requiresAudio
                 )
             }
             if (remuxResult.isSuccess && targetFile.exists() && targetFile.length() > 0L) {
@@ -738,19 +757,29 @@ private fun executeSaveMedia(
         if (isExtractorUrl) {
             DownloadActivityManager.updateProgress(itemId, 0.35f, 0L, 0L, 0L)
             val gdlFile = withContext(Dispatchers.IO) {
-                GalleryDlEngine.downloadMedia(
-                    context = context,
-                    mediaUrl = downloadUrl,
-                    fileName = fileName,
-                    referer = stack.sourceUrl.ifBlank { null }
-                ) ?: run {
-                    if (stack.sourceUrl.isNotBlank() && stack.sourceUrl != downloadUrl) {
-                        GalleryDlEngine.downloadMedia(
-                            context = context,
-                            mediaUrl = stack.sourceUrl,
-                            fileName = fileName,
-                            referer = stack.sourceUrl
-                        )
+                suspend fun downloadAndValidate(url: String, pageUrl: String): File? {
+                    val result = GalleryDlEngine.downloadMediaDetailed(
+                        context = context,
+                        mediaUrl = url,
+                        fileName = fileName,
+                        referer = pageUrl.takeIf { it.isNotBlank() }
+                    )
+                    val candidate = result.file ?: return null
+                    val valid = validateSavedMediaTracks(
+                        candidate,
+                        requireVideo = (item.isVideo && !item.isAudio) || result.requiresVideo,
+                        requireAudio = item.isAudio || requiresAudio || result.requiresAudio
+                    )
+                    if (!valid) {
+                        candidate.delete()
+                        return null
+                    }
+                    return candidate
+                }
+
+                downloadAndValidate(downloadUrl, sourcePageUrl) ?: run {
+                    if (sourcePageUrl.isNotBlank() && sourcePageUrl != downloadUrl) {
+                        downloadAndValidate(sourcePageUrl, sourcePageUrl)
                     } else null
                 }
             }
@@ -787,7 +816,7 @@ private fun executeSaveMedia(
                     mediaUrl = downloadUrl,
                     fileName = fileName,
                     referer = stack.sourceUrl.ifBlank { null },
-                    downloadId = itemId,
+                    downloadId = fileName,
                     domain = effectiveDomain,
                     onProgress = { bytesRead, totalBytes ->
                         val ratio = if (totalBytes > 0L) (bytesRead.toFloat() / totalBytes.toFloat()).coerceIn(0.1f, 0.95f) else 0.5f
@@ -796,6 +825,17 @@ private fun executeSaveMedia(
                 )
             }
             if (result.isSuccessful && result.file != null && result.file.exists()) {
+                val validTracks = withContext(Dispatchers.IO) {
+                    validateSavedMediaTracks(
+                        result.file,
+                        requireVideo = item.isVideo && !item.isAudio,
+                        requireAudio = item.isAudio || requiresAudio
+                    )
+                }
+                if (!validTracks) {
+                    result.file.delete()
+                    Toast.makeText(context, "Downloaded file is missing a required audio/video track.", Toast.LENGTH_LONG).show()
+                } else {
                 val fileUri = Uri.fromFile(result.file).toString()
                 withContext(Dispatchers.IO) {
                     MediaScannerConnection.scanFile(
@@ -813,6 +853,7 @@ private fun executeSaveMedia(
                 updatePocketBookmarkMedia(context, stack, item, fileUri, result.file.length())
                 Toast.makeText(context, "Saved to device: ${result.file.name}", Toast.LENGTH_LONG).show()
                 return@launch
+                }
             }
         }
 
@@ -826,7 +867,8 @@ private fun executeSaveMedia(
             isStream = isStreamUrl,
             category = if (item.isVideo) MediaCategory.VIDEOS else MediaCategory.IMAGES,
             format = item.format.ifBlank { ext.uppercase(Locale.ROOT) },
-            source = "Bookmark Viewer"
+            source = "Bookmark Viewer",
+            metadata = if (requiresAudio) mapOf("requires_audio" to "true") else emptyMap()
         )
         DownloadQueueManager.enqueueDownload(
             context = context,
@@ -840,6 +882,25 @@ private fun executeSaveMedia(
         )
         Toast.makeText(context, "Download queued to device", Toast.LENGTH_SHORT).show()
     }
+}
+
+/**
+ * Checks the actual final container with FFprobe rather than trusting its extension or size.
+ */
+private suspend fun validateSavedMediaTracks(
+    file: File,
+    requireVideo: Boolean,
+    requireAudio: Boolean
+): Boolean {
+    if (!file.isFile || file.length() <= 0L) return false
+    if (!requireVideo && !requireAudio) return true
+    val info = com.amresalehin.emregallery.ffmpeg.FfmpegKitEngine.probeMedia(file.absolutePath) ?: return false
+    return com.amresalehin.emregallery.data.MediaNormalizer.hasExpectedTracks(
+        hasVideo = !info.videoCodec.isNullOrBlank(),
+        hasAudio = !info.audioCodec.isNullOrBlank(),
+        requireVideo = requireVideo,
+        requireAudio = requireAudio
+    ) && info.durationSeconds > 0.0 && info.sizeBytes > 0L
 }
 
 /**

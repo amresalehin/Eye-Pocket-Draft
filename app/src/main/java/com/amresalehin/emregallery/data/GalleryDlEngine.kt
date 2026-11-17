@@ -430,7 +430,7 @@ object GalleryDlEngine {
             val identityUrl = canonicalDownloadIdentity(mediaUrl, referer)
             val targetFile = File(
                 dir,
-                OkHttpDownloader.generateDeterministicId(identityUrl, sanitizedName)
+                OkHttpDownloader.generateStableMediaFileName(identityUrl, sanitizedName)
             )
 
             val userAgent = headers?.get("User-Agent") ?: BotDetectionMitigator.STEALTH_USER_AGENT
@@ -620,7 +620,7 @@ object GalleryDlEngine {
             val outputDirectory = OkHttpDownloader.getTargetStorageDir(context, domain)
             val safeName = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_").ifBlank { "media" }
             val baseName = safeName.substringBeforeLast('.', safeName)
-            val stableMp4Name = OkHttpDownloader.generateDeterministicId(identityUrl, "$baseName.mp4")
+            val stableMp4Name = OkHttpDownloader.generateStableMediaFileName(identityUrl, "$baseName.mp4")
             val stableMp4File = File(outputDirectory, stableMp4Name)
             val mode = resolved.optString("mode", "")
 
@@ -721,7 +721,7 @@ object GalleryDlEngine {
                 } else {
                     "$baseName.$ext"
                 }
-                val stableDirectName = OkHttpDownloader.generateDeterministicId(identityUrl, outputName)
+                val stableDirectName = OkHttpDownloader.generateStableMediaFileName(identityUrl, outputName)
                 val directResult = OkHttpDownloader.downloadMediaFileDetailed(
                     context = context,
                     mediaUrl = streamUrl,

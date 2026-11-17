@@ -6,6 +6,7 @@ import com.amresalehin.emregallery.data.MediaCategory
 import com.amresalehin.emregallery.data.MediaClassifier
 import com.amresalehin.emregallery.data.MediaNormalizer
 import com.amresalehin.emregallery.data.MediaProvenance
+import com.amresalehin.emregallery.data.OkHttpDownloader
 import com.amresalehin.emregallery.data.ScrapedMediaItem
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -24,6 +25,16 @@ class MediaDeduplicationPureUnitTest {
             MediaNormalizer.stableIdentityHash(first),
             MediaNormalizer.stableIdentityHash(second)
         )
+    }
+
+    @Test
+    fun stableMediaFileNameDoesNotDependOnChangingPageTitle() {
+        val identity = "youtube:abcdefghijk"
+        val first = OkHttpDownloader.generateStableMediaFileName(identity, "Original Title.mp4")
+        val second = OkHttpDownloader.generateStableMediaFileName(identity, "Updated Title.mp4")
+
+        assertEquals(first, second)
+        assertTrue(first.endsWith(".mp4"))
     }
 
     @Test

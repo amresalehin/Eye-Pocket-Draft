@@ -30,6 +30,17 @@ object DownloadQueueManager {
     private val activeDownloadCount = java.util.concurrent.atomic.AtomicInteger(0)
     private val activeItemIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
+    /**
+     * YouTube playback URLs are format-specific (itag). Key them by the originating
+     * video page so changing quality/format does not enqueue a second download.
+     */
+    private fun stableQueueIdentity(item: ScrapedMediaItem, fallbackPageUrl: String): String {
+        val pageUrl = item.metadata["source_url"]?.takeIf { it.isNotBlank() } ?: fallbackPageUrl
+        val videoId = MediaClassifier.extractYouTubeVideoId(pageUrl)
+            ?: MediaClassifier.extractYouTubeVideoId(item.url)
+        return videoId?.let { "youtube:$it" } ?: item.url
+    }
+
     fun isDownloading(itemId: String): Boolean {
         if (activeItemIds.contains(itemId)) return true
         val activity = DownloadActivityManager.activities.value.firstOrNull { it.id == itemId }
@@ -117,7 +128,8 @@ object DownloadQueueManager {
             .build()
 
         val dedupKey = MediaClassifier.deduplicationKey(item.url)
-        val uniqueWorkName = "download_${MediaNormalizer.stableIdentityHash(item.url)}"
+        val queueIdentity = stableQueueIdentity(item, url)
+        val uniqueWorkName = "download_${MediaNormalizer.stableIdentityHash(queueIdentity)}"
         // Existing installations may still have active work under the old Int-hash name.
         val legacyUniqueWorkName = "download_${abs(dedupKey.hashCode())}"
 
@@ -227,7 +239,8 @@ object DownloadQueueManager {
                 .build()
 
             val dedupKey = MediaClassifier.deduplicationKey(item.url)
-            val uniqueWorkName = "download_${MediaNormalizer.stableIdentityHash(item.url)}"
+            val queueIdentity = stableQueueIdentity(item, url)
+            val uniqueWorkName = "download_${MediaNormalizer.stableIdentityHash(queueIdentity)}"
             val legacyUniqueWorkName = "download_${abs(dedupKey.hashCode())}"
 
             val existingWorkList = runCatching {

@@ -499,6 +499,30 @@ object OkHttpDownloader {
     }
 
     /**
+     * Stable on-disk name independent of a page title that may change between extractions.
+     * Uses a concrete URL filename when available, or the immutable YouTube video ID.
+     */
+    fun generateStableMediaFileName(mediaUrl: String, fileName: String): String {
+        val extension = fileName.substringAfterLast('.', "")
+            .lowercase(Locale.ROOT)
+            .takeIf { it.matches(Regex("[a-z0-9]{1,8}")) }
+        val youtubeId = MediaClassifier.extractYouTubeVideoId(mediaUrl)
+            ?: Regex("""^youtube:([A-Za-z0-9_-]{11})$""").find(mediaUrl)?.groupValues?.get(1)
+        val pathName = runCatching {
+            java.net.URI(mediaUrl).path.orEmpty().substringAfterLast('/').substringBeforeLast('.')
+        }.getOrDefault("")
+        val genericNames = setOf("", "index", "media", "video", "download", "get", "fetch", "view", "file")
+        val stableBase = when {
+            !youtubeId.isNullOrBlank() -> "youtube_$youtubeId"
+            pathName.length > 2 && pathName.lowercase(Locale.ROOT) !in genericNames ->
+                pathName.replace(Regex("[^a-zA-Z0-9_-]"), "_").take(32)
+            else -> "media"
+        }
+        val stableName = if (extension != null) "$stableBase.$extension" else stableBase
+        return generateDeterministicId(mediaUrl, stableName)
+    }
+
+    /**
      * Extracts a sanitized host/domain token from a URL or referer.
      */
     fun extractDomain(rawUrl: String?): String {

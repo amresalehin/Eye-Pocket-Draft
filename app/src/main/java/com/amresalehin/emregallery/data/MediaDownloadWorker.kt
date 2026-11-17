@@ -96,7 +96,7 @@ class MediaDownloadWorker(
 
         val youtubeVideoId = MediaClassifier.extractYouTubeVideoId(sourceUrl)
         val stableIdentityUrl = youtubeVideoId?.let { "youtube:$it" } ?: mediaUrl
-        val stableDownloadId = OkHttpDownloader.generateDeterministicId(stableIdentityUrl, fileName)
+        val stableDownloadId = OkHttpDownloader.generateStableMediaFileName(stableIdentityUrl, fileName)
 
         val downloadHeaders: Map<String, String> = runCatching {
             if (!headersJson.isNullOrBlank()) {
