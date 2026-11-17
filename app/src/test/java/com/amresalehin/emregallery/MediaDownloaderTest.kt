@@ -43,6 +43,42 @@ import java.io.File
 class MediaDownloaderTest {
 
     @Test
+    fun videoDownloadsPreferOriginPostUrlWhenDirectMediaUrlIsOnlyAnAsset() {
+        assertTrue(
+            MediaDownloadWorker.shouldUseOriginPageForVideo(
+                mediaUrl = "https://v.redd.it/abc/DASH_720.mp4",
+                sourceUrl = "https://www.reddit.com/r/example/comments/abc/post/",
+                isVideo = true,
+                isStream = false
+            )
+        )
+        assertTrue(
+            MediaDownloadWorker.shouldUseOriginPageForVideo(
+                mediaUrl = "https://cdn.example.com/playlist.m3u8",
+                sourceUrl = "https://example.com/watch/123",
+                isVideo = false,
+                isStream = true
+            )
+        )
+        assertFalse(
+            MediaDownloadWorker.shouldUseOriginPageForVideo(
+                mediaUrl = "https://cdn.example.com/video.mp4",
+                sourceUrl = "https://cdn.example.com/video.mp4",
+                isVideo = true,
+                isStream = false
+            )
+        )
+        assertFalse(
+            MediaDownloadWorker.shouldUseOriginPageForVideo(
+                mediaUrl = "https://cdn.example.com/video.mp4",
+                sourceUrl = "",
+                isVideo = true,
+                isStream = false
+            )
+        )
+    }
+
+    @Test
     fun downloadIdentityUsesCanonicalUrlInsteadOfCallerId() {
         val first = OkHttpDownloader.stableDownloadBaseName(
             "https://cdn.example.com/a/video.mp4?token=one",

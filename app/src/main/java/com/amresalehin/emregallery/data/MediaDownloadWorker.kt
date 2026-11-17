@@ -147,16 +147,22 @@ class MediaDownloadWorker(
                 (mediaUrl.contains(".mp4", ignoreCase = true) && !sourceUrl.contains("youtube.com", ignoreCase = true) && !sourceUrl.contains("youtu.be", ignoreCase = true))
             )
 
-            val targetUrl = if (sourceUrl.contains("youtube.com", ignoreCase = true) || sourceUrl.contains("youtu.be", ignoreCase = true)) {
-                sourceUrl
-            } else {
-                mediaUrl
-            }
-
-            val mediaMode = resolveMediaMode(isVideo = isVideo, isAudio = isAudio, isStream = isStream)
             val isYouTubeSource = sourceUrl.contains("youtube.com", ignoreCase = true) ||
                 sourceUrl.contains("youtu.be", ignoreCase = true)
-            val requireAudioTrack = isVideo && isYouTubeSource
+            val isRedditSource = sourceUrl.contains("reddit.com", ignoreCase = true) ||
+                sourceUrl.contains("redd.it", ignoreCase = true) ||
+                mediaUrl.contains("v.redd.it", ignoreCase = true)
+            val targetUrl = if (isYouTubeSource || shouldUseOriginPageForVideo(
+                    mediaUrl = mediaUrl,
+                    sourceUrl = sourceUrl,
+                    isVideo = isVideo,
+                    isStream = isStream
+                )
+            ) sourceUrl else mediaUrl
+
+            val mediaMode = resolveMediaMode(isVideo = isVideo, isAudio = isAudio, isStream = isStream)
+            // Reddit/YouTube often expose separate audio and video representations.
+            val requireAudioTrack = isVideo && (isYouTubeSource || isRedditSource)
 
             val effectiveDomain = sourceDomain.takeIf { it.isNotBlank() }
                 ?: OkHttpDownloader.extractDomain(sourceUrl.ifBlank { mediaUrl })
@@ -334,6 +340,20 @@ class MediaDownloadWorker(
     }
 
     companion object {
+        internal fun shouldUseOriginPageForVideo(
+            mediaUrl: String,
+            sourceUrl: String,
+            isVideo: Boolean,
+            isStream: Boolean
+        ): Boolean {
+            val origin = sourceUrl.trim()
+            return (isVideo || isStream) &&
+                origin.isNotBlank() &&
+                !origin.equals(mediaUrl.trim(), ignoreCase = true) &&
+                (origin.startsWith("http://", ignoreCase = true) ||
+                    origin.startsWith("https://", ignoreCase = true))
+        }
+
         internal fun resolveMediaMode(isVideo: Boolean, isAudio: Boolean, isStream: Boolean): String {
             return when {
                 isAudio && !isVideo -> "audio"
