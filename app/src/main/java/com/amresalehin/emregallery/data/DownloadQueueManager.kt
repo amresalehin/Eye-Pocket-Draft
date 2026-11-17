@@ -151,7 +151,7 @@ object DownloadQueueManager {
             // An existing worker can only complete its own item ID. Do not create a
             // second queue record that will remain DOWNLOADING forever.
             finalWorkId = activeWork.id
-            shouldRecordActivity = activeWork.inputData.getString(MediaDownloadWorker.KEY_ITEM_ID) == item.id
+            shouldRecordActivity = activeWork.tags.contains("item_${item.id}")
         } else {
             finalWorkId = request.id
             workManager.enqueueUniqueWork(
@@ -256,7 +256,7 @@ object DownloadQueueManager {
 
             if (activeWork != null) {
                 // Never attach an untracked alias ID to an existing worker.
-                if (activeWork.inputData.getString(MediaDownloadWorker.KEY_ITEM_ID) == item.id) {
+                if (activeWork.tags.contains("item_${item.id}")) {
                     activityItems.add(item)
                     activityWorkIds.add(activeWork.id)
                 }
@@ -297,8 +297,9 @@ object DownloadQueueManager {
     fun cancelDownload(context: Context, workId: UUID) {
         val workManager = WorkManager.getInstance(context)
         val itemId = runCatching {
-            workManager.getWorkInfoById(workId).get()?.inputData
-                ?.getString(MediaDownloadWorker.KEY_ITEM_ID)
+            workManager.getWorkInfoById(workId).get()?.tags
+                ?.firstOrNull { it.startsWith("item_") }
+                ?.removePrefix("item_")
         }.getOrNull()
         runCatching { workManager.cancelWorkById(workId) }
         // Handles ENQUEUED work cancelled before doWork/finally can run; worker completion
