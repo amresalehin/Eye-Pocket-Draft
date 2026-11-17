@@ -809,9 +809,6 @@ object MediaClassifier {
     }
 
     /**
-     * Creates a canonical deduplication key by removing non-functional tracking query parameters.
-     */
-    /**
      * Produces a conservative identity key for saved web pages.
      *
      * Unlike media deduplication, this does not rewrite CDN paths, collapse image
