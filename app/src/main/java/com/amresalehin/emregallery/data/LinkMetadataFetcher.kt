@@ -71,7 +71,9 @@ object LinkMetadataFetcher {
                             isStream = item.isStream,
                             format = item.format,
                             sizeBytes = item.sizeBytes ?: 0L,
-                            dateAddedMillis = System.currentTimeMillis()
+                            dateAddedMillis = System.currentTimeMillis(),
+                            width = item.width ?: MediaCaptureEngine.extractDimension(item.resolutionHint, item.url, true) ?: 0,
+                            height = item.height ?: MediaCaptureEngine.extractDimension(item.resolutionHint, item.url, false) ?: 0
                         )
                     }
                     val preview = gdlRes.previewImageUrl.ifBlank {
@@ -486,7 +488,13 @@ object LinkMetadataFetcher {
         val items = mutableListOf<MediaInboxItem>()
         val seenUrls = mutableSetOf<String>()
 
-        fun addCandidate(rawUrl: String?, titleHint: String?, isVideo: Boolean = false) {
+        fun addCandidate(
+            rawUrl: String?,
+            titleHint: String?,
+            isVideo: Boolean = false,
+            width: Int? = null,
+            height: Int? = null
+        ) {
             if (rawUrl.isNullOrBlank()) return
             val resolved = resolveAbsoluteUrl(baseUrl, rawUrl).trim()
             if (resolved.isBlank() || !resolved.startsWith("http", ignoreCase = true)) return
@@ -531,7 +539,9 @@ object LinkMetadataFetcher {
                     isVideo = isActualVideo,
                     isStream = isM3u8,
                     format = format,
-                    dateAddedMillis = System.currentTimeMillis()
+                    dateAddedMillis = System.currentTimeMillis(),
+                    width = width ?: MediaCaptureEngine.extractDimension(null, resolved, true) ?: 0,
+                    height = height ?: MediaCaptureEngine.extractDimension(null, resolved, false) ?: 0
                 )
             )
         }
@@ -542,7 +552,12 @@ object LinkMetadataFetcher {
             val srcset = img.attr("srcset").ifBlank { img.attr("data-srcset") }
             if (srcset.isNotBlank()) {
                 parseSrcsetUrls(srcset).forEach { candidate ->
-                    addCandidate(candidate, alt)
+                    addCandidate(
+                        candidate,
+                        alt,
+                        width = img.attr("width").toIntOrNull(),
+                        height = img.attr("height").toIntOrNull()
+                    )
                 }
             }
             // 2. High-res and lazy attributes
@@ -554,7 +569,12 @@ object LinkMetadataFetcher {
             for (attr in lazyAttrs) {
                 val u = img.attr(attr).trim()
                 if (u.isNotBlank()) {
-                    addCandidate(u, alt)
+                    addCandidate(
+                        u,
+                        alt,
+                        width = img.attr("width").toIntOrNull(),
+                        height = img.attr("height").toIntOrNull()
+                    )
                 }
             }
         }
@@ -590,7 +610,13 @@ object LinkMetadataFetcher {
             val src = vid.absUrl("src").ifBlank { vid.attr("src") }
                 .ifBlank { vid.absUrl("data-src").ifBlank { vid.attr("data-src") } }
                 .ifBlank { vid.absUrl("data-video-src").ifBlank { vid.attr("data-video-src") } }
-            if (src.isNotBlank()) addCandidate(src, "Video", isVideo = true)
+            if (src.isNotBlank()) addCandidate(
+                src,
+                "Video",
+                isVideo = true,
+                width = vid.attr("width").toIntOrNull(),
+                height = vid.attr("height").toIntOrNull()
+            )
             vid.select("source").forEach { s ->
                 val sSrc = s.absUrl("src").ifBlank { s.attr("src") }
                     .ifBlank { s.absUrl("data-src").ifBlank { s.attr("data-src") } }
