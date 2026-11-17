@@ -147,10 +147,8 @@ class PocketRepository(
         var width = item.width.takeIf { it > 0 }
         var height = item.height.takeIf { it > 0 }
 
-        // Retain dimensions supplied in extractor metadata or explicit resolution/URL hints.
-        val hinted = parseDimensionsFromText("${item.title} ${item.sourceUrl}")
-        width = width ?: hinted.first
-        height = height ?: hinted.second
+        // Only persisted/source-reported dimensions or decoded image bounds are authoritative.
+        // Filename tokens and arbitrary URL parameters are not reliable pixel measurements.
         if (width != null && height != null) return width to height
 
         // Resolve real dimensions from a local image without decoding its full bitmap.
