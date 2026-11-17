@@ -655,25 +655,56 @@ class PocketRepository(
             emptyList()
         }
 
-        val existingBookmark = _bookmarks.value.firstOrNull { it.sourceUrl.isNotBlank() && it.sourceUrl == cleanUrl }
+        val bookmarkKey = MediaClassifier.bookmarkDeduplicationKey(cleanUrl)
+        val existingBookmark = if (bookmarkKey.isBlank()) {
+            null
+        } else {
+            _bookmarks.value.firstOrNull { existing ->
+                existing.sourceUrl.isNotBlank() &&
+                    MediaClassifier.bookmarkDeduplicationKey(existing.sourceUrl) == bookmarkKey
+            }
+        }
         val rawItems = directItems + initialItems + (existingBookmark?.items ?: emptyList())
         val finalItems = MediaNormalizer.deduplicateMediaInboxItems(rawItems)
 
+        val fallbackTitle = if (isMedia) mediaFileName else cleanDomain.ifBlank { cleanUrl }
+        val incomingTitle = title.ifBlank { fallbackTitle }
+        val incomingTitleIsGeneric = title.isBlank() ||
+            title.equals(cleanDomain, ignoreCase = true) ||
+            title.equals(cleanUrl, ignoreCase = true) ||
+            title == "Untitled Bookmark"
+        val existingTitleIsMeaningful = existingBookmark != null &&
+            existingBookmark.title.isNotBlank() &&
+            !existingBookmark.title.equals(existingBookmark.sourceDomain, ignoreCase = true) &&
+            !existingBookmark.title.equals(existingBookmark.sourceUrl, ignoreCase = true) &&
+            existingBookmark.title != "Untitled Bookmark"
+        val resolvedTitle = if (existingTitleIsMeaningful && incomingTitleIsGeneric) {
+            existingBookmark!!.title
+        } else {
+            incomingTitle
+        }
+
+        // Preserve the first saved URL and enriched fields when another tracking-decorated
+        // version of the same page is saved later.
         val initialPreview = previewImageUrl.ifBlank {
-            if (isMedia) cleanUrl
-            else finalItems.firstOrNull { !it.isVideo && !it.isStream && it.sourceUrl.isNotBlank() }?.sourceUrl
-                ?: finalItems.firstOrNull { it.sourceUrl.isNotBlank() }?.sourceUrl
-                ?: existingBookmark?.previewImageUrl ?: ""
+            existingBookmark?.previewImageUrl?.takeIf { it.isNotBlank() }
+                ?: if (isMedia) cleanUrl
+                else finalItems.firstOrNull { !it.isVideo && !it.isStream && it.sourceUrl.isNotBlank() }?.sourceUrl
+                    ?: finalItems.firstOrNull { it.sourceUrl.isNotBlank() }?.sourceUrl
+                    ?: ""
         }
 
         val bookmark = MediaInboxStack(
             id = existingBookmark?.id ?: "bookmark_${System.currentTimeMillis()}",
-            title = title.ifBlank { if (isMedia) mediaFileName else cleanDomain.ifBlank { cleanUrl } },
-            sourceDomain = cleanDomain,
-            sourceUrl = cleanUrl,
+            title = resolvedTitle,
+            sourceDomain = existingBookmark?.sourceDomain?.ifBlank { cleanDomain } ?: cleanDomain,
+            sourceUrl = existingBookmark?.sourceUrl ?: cleanUrl,
             items = finalItems,
             timestampMillis = System.currentTimeMillis(),
-            description = description.ifBlank { if (isMedia) (if (isDirectVideo) "Saved Video" else "Saved Image") else existingBookmark?.description ?: "" },
+            description = description.ifBlank {
+                existingBookmark?.description?.takeIf { it.isNotBlank() }
+                    ?: if (isMedia) (if (isDirectVideo) "Saved Video" else "Saved Image") else ""
+            },
             previewImageUrl = initialPreview
         )
         val updated = listOf(bookmark) + _bookmarks.value.filter {
