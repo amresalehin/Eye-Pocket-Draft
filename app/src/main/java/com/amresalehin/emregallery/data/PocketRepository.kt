@@ -744,11 +744,14 @@ class PocketRepository(
                 val newDesc = if (latest.description.isBlank() && meta.description.isNotBlank()) meta.description else latest.description
                 val newDomain = if (latest.sourceDomain.isBlank() && meta.domain.isNotBlank()) meta.domain else latest.sourceDomain
 
-                val newItems = if (latest.items.isEmpty() && meta.mediaItems.isNotEmpty()) {
-                    meta.mediaItems
+                val metadataItems = meta.mediaItems.filterNot { item ->
+                    item.sourceUrl.contains("google.com/s2/favicons", ignoreCase = true)
+                }
+                val newItems = if (latest.items.isEmpty() && metadataItems.isNotEmpty()) {
+                    metadataItems
                 } else if (latest.items.isNotEmpty()) {
-                    if (meta.mediaItems.isNotEmpty()) {
-                        MediaNormalizer.deduplicateMediaInboxItems(latest.items + meta.mediaItems)
+                    if (metadataItems.isNotEmpty()) {
+                        MediaNormalizer.deduplicateMediaInboxItems(latest.items + metadataItems)
                     } else {
                         latest.items
                     }
@@ -756,12 +759,17 @@ class PocketRepository(
                     emptyList()
                 }
 
-                val newPreview = if (newItems.isNotEmpty()) {
-                    newItems.firstOrNull { !it.isVideo && !it.isStream && it.sourceUrl.isNotBlank() }?.sourceUrl
+                val hasRealCurrentPreview = latest.previewImageUrl.isNotBlank() &&
+                    !latest.previewImageUrl.contains("google.com/s2/favicons", ignoreCase = true)
+                val metadataPreview = meta.previewImageUrl.takeIf {
+                    it.isNotBlank() && !it.contains("google.com/s2/favicons", ignoreCase = true)
+                }
+                val newPreview = when {
+                    hasRealCurrentPreview -> latest.previewImageUrl
+                    metadataPreview != null -> metadataPreview
+                    else -> newItems.firstOrNull { !it.isVideo && !it.isStream && it.sourceUrl.isNotBlank() }?.sourceUrl
                         ?: newItems.firstOrNull { it.sourceUrl.isNotBlank() }?.sourceUrl
                         ?: latest.previewImageUrl
-                } else {
-                    latest.previewImageUrl
                 }
 
                 if (newTitle != latest.title || newDesc != latest.description || newPreview != latest.previewImageUrl ||
