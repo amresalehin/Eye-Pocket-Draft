@@ -396,17 +396,6 @@ class PocketRepository(
     }
 
     /**
-     * Evaluates whether an item meets the minimum size requirement (0 KB to 10 MB).
-     * If minSizeKb <= 0, all sizes match.
-     */
-    fun itemMatchesSize(item: MediaInboxItem, minSizeKb: Int): Boolean {
-        if (minSizeKb <= 0) return true
-        val minSizeBytes = minSizeKb * 1024L
-        val actualSize = resolveItemSizeBytes(item)
-        return actualSize >= minSizeBytes
-    }
-
-    /**
      * Sanitizes a bookmark stack according to showSvg, media types (Videos, Streams, PNGs, GIFs),
      * minimum dimensions (horizontal/vertical from 0 to infinity), and media size (0KB to 10MB).
      * Any media item failing the active filters is hidden from found media.
