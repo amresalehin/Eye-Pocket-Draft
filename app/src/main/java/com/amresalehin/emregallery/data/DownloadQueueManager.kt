@@ -48,7 +48,9 @@ object DownloadQueueManager {
     }
 
     fun markDownloadStarted(count: Int = 1, itemId: String? = null) {
-        if (itemId != null) activeItemIds.add(itemId)
+        // Two callers may race before WorkManager persists the first unique request.
+        // Track and increment only once for a given worker item ID.
+        if (itemId != null && !activeItemIds.add(itemId)) return
         activeDownloadCount.addAndGet(count)
         _inMemoryDownloading.value = true
     }

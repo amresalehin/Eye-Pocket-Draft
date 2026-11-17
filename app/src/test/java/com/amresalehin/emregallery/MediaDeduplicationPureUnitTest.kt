@@ -28,6 +28,18 @@ class MediaDeduplicationPureUnitTest {
     }
 
     @Test
+    fun dataUriDeduplicationUsesCollisionResistantContentHash() {
+        // "FB" and "Ea" intentionally collide under Java String.hashCode().
+        val first = "data:text/plain,FB"
+        val second = "data:text/plain,Ea"
+
+        assertFalse(
+            MediaClassifier.deduplicationKey(first) ==
+                MediaClassifier.deduplicationKey(second)
+        )
+    }
+
+    @Test
     fun stableMediaFileNameDoesNotDependOnChangingPageTitle() {
         val identity = "youtube:abcdefghijk"
         val first = OkHttpDownloader.generateStableMediaFileName(identity, "Original Title.mp4")

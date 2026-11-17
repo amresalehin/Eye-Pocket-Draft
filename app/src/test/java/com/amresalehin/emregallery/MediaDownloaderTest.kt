@@ -39,6 +39,23 @@ import java.io.File
 class MediaDownloaderTest {
 
     @Test
+    fun duplicateWorkerStartAndCompletionDoNotLeavePhantomActiveCount() {
+        val manager = com.amresalehin.emregallery.data.DownloadQueueManager
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        manager.cancelAll(context)
+
+        manager.markDownloadStarted(count = 1, itemId = "same-media-item")
+        manager.markDownloadStarted(count = 1, itemId = "same-media-item")
+        manager.markDownloadCompleted("same-media-item")
+
+        assertFalse(manager.inMemoryDownloading.value)
+        // A racing duplicate completion must be ignored rather than decrementing below zero.
+        manager.markDownloadCompleted("same-media-item")
+        assertFalse(manager.inMemoryDownloading.value)
+        manager.cancelAll(context)
+    }
+
+    @Test
     fun destinationEnumContainsMediaInbox() {
         assertEquals("MEDIA_INBOX", Destination.MEDIA_INBOX.name)
     }

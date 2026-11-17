@@ -860,9 +860,15 @@ object MediaClassifier {
         return try {
             val resolved = resolveOriginalMedia(url).mediaUrl
 
-            // If it's a data URI, hash its base64 content
+            // Data URIs can be very large and may contain binary media. Use the full
+            // content digest rather than a 32-bit String.hashCode() that can collide.
             if (resolved.startsWith("data:", ignoreCase = true)) {
-                return "data_uri_${abs(resolved.hashCode())}"
+                val digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(resolved.toByteArray(Charsets.UTF_8))
+                val contentHash = digest.joinToString("") { byte ->
+                    byte.toUByte().toString(16).padStart(2, '0')
+                }
+                return "data_uri_$contentHash"
             }
 
             val clean = cleanMediaUrl(resolved)

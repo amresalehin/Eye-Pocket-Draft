@@ -651,8 +651,9 @@ private fun executeSaveMedia(
         val youtubeVideoId = com.amresalehin.emregallery.data.MediaClassifier.extractYouTubeVideoId(sourcePageUrl)
             ?: com.amresalehin.emregallery.data.MediaClassifier.extractYouTubeVideoId(downloadUrl)
         val stableMediaIdentity = youtubeVideoId?.let { "youtube:$it" } ?: downloadUrl
+        val sourceSupport = GalleryDlEngine.checkSupport(sourcePageUrl)
         val requiresAudio = item.requiresAudio || (
-            item.isVideo && GalleryDlEngine.checkSupport(sourcePageUrl).extractorEngine == "yt-dlp"
+            item.isVideo && sourceSupport.isSupported && sourceSupport.extractorEngine == "yt-dlp"
         )
         val fileName = OkHttpDownloader.generateStableMediaFileName(stableMediaIdentity, requestedFileName)
         val thumb = if (item.localUri.isNotBlank()) item.localUri else (item.sourceUrl.ifBlank { stack.previewImageUrl })
