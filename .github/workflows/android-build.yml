@@ -8,6 +8,7 @@ on:
       - 'integration/**'
       - 'fix/**'
       - 'chore/**'
+      - restore-point-before-removing-cap-of-deep-scan-2026-11-12
   pull_request:
     branches:
       - main
@@ -61,8 +62,7 @@ jobs:
             echo "Required NDK and CMake versions are already installed."
           fi
 
-      # llama.cpp + mtmd are compiled from source for both configured Android ABIs.
-      # Preserve CMake/Ninja state and native object files across commits on this branch.
+      # Preserve native CMake state across commits on the long-lived feature branch.
       - name: Restore native CMake build cache
         uses: actions/cache@v4
         with:
@@ -84,8 +84,6 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
         with:
-          # Also persist Gradle's dependency and task-output cache on the long-lived
-          # feature branch instead of making every feature-branch run read-only.
           cache-read-only: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/fix/cloud-vision-production-20261110' }}
 
       - name: Run unit tests and assemble debug APK
