@@ -540,8 +540,8 @@ object LinkMetadataFetcher {
                     isStream = isM3u8,
                     format = format,
                     dateAddedMillis = System.currentTimeMillis(),
-                    width = width ?: MediaCaptureEngine.extractDimension(null, resolved, true) ?: 0,
-                    height = height ?: MediaCaptureEngine.extractDimension(null, resolved, false) ?: 0
+                    width = width?.takeIf { it > 0 } ?: 0,
+                    height = height?.takeIf { it > 0 } ?: 0
                 )
             )
         }
