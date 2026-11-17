@@ -629,7 +629,6 @@ private fun executeSaveMedia(
         Toast.makeText(context, "Saving media to device...", Toast.LENGTH_SHORT).show()
         DownloadActivityManager.initialize(context)
 
-        val targetDir = OkHttpDownloader.getTargetStorageDir(context)
         val downloadUrl = item.sourceUrl.ifBlank { item.localUri }
         val ext = when {
             item.isVideo -> "mp4"
@@ -658,6 +657,9 @@ private fun executeSaveMedia(
         val fileName = OkHttpDownloader.generateStableMediaFileName(stableMediaIdentity, requestedFileName)
         val thumb = if (item.localUri.isNotBlank()) item.localUri else (item.sourceUrl.ifBlank { stack.previewImageUrl })
         val effectiveDomain = stack.sourceDomain.ifBlank { OkHttpDownloader.extractDomain(stack.sourceUrl.ifBlank { downloadUrl }) }
+        // Use the same domain directory as DownloadQueueManager and GalleryDlEngine;
+        // otherwise the same URL can be saved once in a root folder and again by host.
+        val targetDir = OkHttpDownloader.getTargetStorageDir(context, effectiveDomain)
 
         DownloadActivityManager.recordQueued(
             id = itemId,
