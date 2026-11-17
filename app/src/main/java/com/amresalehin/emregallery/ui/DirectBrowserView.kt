@@ -563,7 +563,9 @@ fun DirectBrowserView(
                                 isStream = scraped.isStream,
                                 format = scraped.format,
                                 sizeBytes = scraped.sizeBytes ?: 0L,
-                                dateAddedMillis = scraped.detectedAt.takeIf { it > 0 } ?: System.currentTimeMillis()
+                                dateAddedMillis = scraped.detectedAt.takeIf { it > 0 } ?: System.currentTimeMillis(),
+                                width = scraped.width ?: 0,
+                                height = scraped.height ?: 0
                             )
                         }
 
