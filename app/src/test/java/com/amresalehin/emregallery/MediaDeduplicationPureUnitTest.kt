@@ -50,6 +50,19 @@ class MediaDeduplicationPureUnitTest {
     }
 
     @Test
+    fun differentMediaItemsOnTheSamePageGetDifferentStableFilenames() {
+        val firstMedia = "https://cdn.example.com/album-42/image-one.jpg"
+        val secondMedia = "https://cdn.example.com/album-42/image-two.jpg"
+
+        val firstName = OkHttpDownloader.generateStableMediaFileName(firstMedia, "same-page-title.jpg")
+        val secondName = OkHttpDownloader.generateStableMediaFileName(secondMedia, "same-page-title.jpg")
+
+        assertFalse(firstName == secondName)
+        assertTrue(firstName.endsWith(".jpg"))
+        assertTrue(secondName.endsWith(".jpg"))
+    }
+
+    @Test
     fun stableIdentityHashPreservesMeaningfulResourceTokens() {
         val first = "https://cdn.example.com/video.mp4?token=alpha"
         val second = "https://cdn.example.com/video.mp4?token=beta"

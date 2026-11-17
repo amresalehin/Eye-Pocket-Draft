@@ -419,7 +419,8 @@ object GalleryDlEngine {
         referer: String? = null,
         headers: Map<String, String>? = null,
         cookies: String? = null,
-        domain: String? = null
+        domain: String? = null,
+        identityUrl: String? = null
     ): GalleryDlDownloadResult = withContext(Dispatchers.IO) {
         try {
             val effectiveDomain = domain?.replace(Regex("[^a-zA-Z0-9.-]"), "_")?.trim()?.takeIf { it.isNotBlank() }
@@ -427,10 +428,10 @@ object GalleryDlEngine {
             val dir = OkHttpDownloader.getTargetStorageDir(context, effectiveDomain)
 
             val sanitizedName = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
-            val identityUrl = canonicalDownloadIdentity(mediaUrl, referer)
+            val mediaIdentity = canonicalDownloadIdentity(identityUrl ?: mediaUrl, referer)
             val targetFile = File(
                 dir,
-                OkHttpDownloader.generateStableMediaFileName(identityUrl, sanitizedName)
+                OkHttpDownloader.generateStableMediaFileName(mediaIdentity, sanitizedName)
             )
 
             val userAgent = headers?.get("User-Agent") ?: BotDetectionMitigator.STEALTH_USER_AGENT
@@ -463,7 +464,8 @@ object GalleryDlEngine {
                     userAgent = userAgent,
                     cookies = effectiveCookies ?: "",
                     headers = headers ?: emptyMap(),
-                    domain = effectiveDomain
+                    domain = effectiveDomain,
+                    identityUrl = identityUrl
                 )
                 if (nativeAttempt.handled) {
                     return@withContext GalleryDlDownloadResult(
@@ -553,13 +555,14 @@ object GalleryDlEngine {
         userAgent: String,
         cookies: String,
         headers: Map<String, String>,
-        domain: String
+        domain: String,
+        identityUrl: String? = null
     ): NativeYtDlpAttempt = withContext(Dispatchers.IO) {
         var tempDir: File? = null
         var resolverSucceeded = false
         var requiresVideo = false
         var requiresAudio = false
-        val identityUrl = canonicalDownloadIdentity(mediaUrl, referer)
+        val mediaIdentity = canonicalDownloadIdentity(identityUrl ?: mediaUrl, referer)
         try {
             val effectiveHeaders = headers.toMutableMap().apply {
                 if (userAgent.isNotBlank()) put("User-Agent", userAgent)
@@ -620,7 +623,7 @@ object GalleryDlEngine {
             val outputDirectory = OkHttpDownloader.getTargetStorageDir(context, domain)
             val safeName = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_").ifBlank { "media" }
             val baseName = safeName.substringBeforeLast('.', safeName)
-            val stableMp4Name = OkHttpDownloader.generateStableMediaFileName(identityUrl, "$baseName.mp4")
+            val stableMp4Name = OkHttpDownloader.generateStableMediaFileName(mediaIdentity, "$baseName.mp4")
             val stableMp4File = File(outputDirectory, stableMp4Name)
             val mode = resolved.optString("mode", "")
 
@@ -637,7 +640,7 @@ object GalleryDlEngine {
 
                 tempDir = File(
                     context.cacheDir,
-                    "yt-dlp-mux-${MediaNormalizer.stableIdentityHash(identityUrl).take(20)}-${System.nanoTime()}"
+                    "yt-dlp-mux-${MediaNormalizer.stableIdentityHash(mediaIdentity).take(20)}-${System.nanoTime()}"
                 )
                 if (!tempDir!!.mkdirs() && !tempDir!!.isDirectory) {
                     return@withContext NativeYtDlpAttempt(true, null, requiresVideo, requiresAudio)
@@ -721,7 +724,7 @@ object GalleryDlEngine {
                 } else {
                     "$baseName.$ext"
                 }
-                val stableDirectName = OkHttpDownloader.generateStableMediaFileName(identityUrl, outputName)
+                val stableDirectName = OkHttpDownloader.generateStableMediaFileName(mediaIdentity, outputName)
                 val directResult = OkHttpDownloader.downloadMediaFileDetailed(
                     context = context,
                     mediaUrl = streamUrl,

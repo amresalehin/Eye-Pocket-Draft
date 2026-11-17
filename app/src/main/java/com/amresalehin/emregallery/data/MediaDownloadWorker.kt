@@ -193,7 +193,8 @@ class MediaDownloadWorker(
                     referer = referer ?: sourceUrl,
                     headers = downloadHeaders,
                     cookies = cookieString,
-                    domain = effectiveDomain
+                    domain = effectiveDomain,
+                    identityUrl = mediaUrl
                 )
                 downloadedFile = primaryResult.file
                 extractorRequiresVideo = extractorRequiresVideo || primaryResult.requiresVideo
@@ -207,7 +208,8 @@ class MediaDownloadWorker(
                         referer = referer ?: sourceUrl,
                         headers = downloadHeaders,
                         cookies = cookieString,
-                        domain = effectiveDomain
+                        domain = effectiveDomain,
+                        identityUrl = mediaUrl
                     )
                     downloadedFile = directResult.file
                     extractorRequiresVideo = extractorRequiresVideo || directResult.requiresVideo

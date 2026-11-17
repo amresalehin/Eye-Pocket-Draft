@@ -769,7 +769,8 @@ private fun executeSaveMedia(
                         mediaUrl = url,
                         fileName = fileName,
                         referer = pageUrl.takeIf { it.isNotBlank() },
-                        domain = effectiveDomain
+                        domain = effectiveDomain,
+                        identityUrl = downloadUrl
                     )
                     val candidate = result.file ?: return null
                     val valid = validateSavedMediaTracks(
