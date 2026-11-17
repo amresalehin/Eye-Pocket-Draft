@@ -998,11 +998,15 @@ fun PocketBookmarkStaggeredCard(
         }
     }
 
-    val firstMedia = stack.items.firstOrNull()
+    val firstMedia = stack.items.firstOrNull { item ->
+        !item.sourceUrl.contains("google.com/s2/favicons", ignoreCase = true)
+    }
     val mediaModel = remember(firstMedia, stack.previewImageUrl) {
-        // A bookmark's Open Graph/website preview is its primary visual identity.
-        // Discovered media is only a fallback when the page has no preview image.
-        stack.previewImageUrl.takeIf { it.isNotBlank() } ?: firstMedia?.let { item ->
+        // A bookmark's actual Open Graph preview is its primary visual identity.
+        // Generic site favicons are not page covers; use a discovered image instead.
+        stack.previewImageUrl.takeIf {
+            it.isNotBlank() && !it.contains("google.com/s2/favicons", ignoreCase = true)
+        } ?: firstMedia?.let { item ->
             when {
                 item.localUri.startsWith("content://", ignoreCase = true) -> item.localUri
                 item.localUri.startsWith("file://", ignoreCase = true) -> {
