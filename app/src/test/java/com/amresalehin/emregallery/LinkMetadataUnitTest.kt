@@ -9,6 +9,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.runBlocking
+import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -32,6 +33,7 @@ class LinkMetadataUnitTest {
             .edit()
             .clear()
             .commit()
+        File(context.filesDir, "pocket/bookmarks.json").delete()
     }
 
     @Test
@@ -245,5 +247,32 @@ class LinkMetadataUnitTest {
 
         val tiktokSupport = com.amresalehin.emregallery.data.GalleryDlEngine.checkSupport("https://www.tiktok.com/@user/video/123456")
         assertTrue("TikTok should be recognized as supported extractor", tiktokSupport.isSupported)
+    }
+
+    @Test
+    fun testAddBookmarkTreatsTrackedAndReorderedUrlsAsDuplicate() {
+        val testScope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
+        val repository = PocketRepository(context, testScope)
+
+        val first = repository.addBookmark(
+            title = "A useful article",
+            url = "https://EXAMPLE.com:443/articles/./economics?id=42&lang=en&utm_source=newsletter&fbclid=tracker",
+            description = "The original description",
+            previewImageUrl = "https://example.com/cover.jpg",
+            autoFetchMetadata = false
+        )
+
+        val duplicate = repository.addBookmark(
+            title = "example.com",
+            url = "https://example.com/articles/economics?lang=en&id=42&gclid=tracking",
+            autoFetchMetadata = false
+        )
+
+        assertEquals("A tracked/reordered URL must reuse the existing bookmark ID", first.id, duplicate.id)
+        assertEquals("Only one bookmark should remain", 1, repository.bookmarks.value.size)
+        assertEquals("Keep the first saved source URL", first.sourceUrl, duplicate.sourceUrl)
+        assertEquals("Do not replace an enriched title with a generic domain title", "A useful article", duplicate.title)
+        assertEquals("Keep the existing description", "The original description", duplicate.description)
+        assertEquals("Keep the existing preview", "https://example.com/cover.jpg", duplicate.previewImageUrl)
     }
 }
