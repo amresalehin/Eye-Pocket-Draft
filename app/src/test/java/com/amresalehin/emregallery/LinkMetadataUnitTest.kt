@@ -11,6 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.runBlocking
 import java.io.File
+import org.jsoup.Jsoup
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -421,5 +422,49 @@ class LinkMetadataUnitTest {
         assertEquals(1600, restored.width)
         assertEquals(1200, restored.height)
         assertEquals(42_000L, restored.sizeBytes)
+    }
+
+    @Test
+    fun testStaticHtmlExtractionRetainsDeclaredImageDimensions() {
+        val doc = Jsoup.parse(
+            """
+                <html><body>
+                    <article>
+                        <img src="/images/hero.jpg" alt="Hero" width="1280" height="720">
+                    </article>
+                </body></html>
+            """.trimIndent(),
+            "https://example.com/article"
+        )
+
+        val items = LinkMetadataFetcher.extractSiteMedia(
+            doc = doc,
+            baseUrl = "https://example.com/article",
+            defaultTitle = "Article"
+        )
+        val hero = items.first { it.sourceUrl == "https://example.com/images/hero.jpg" }
+
+        assertEquals(1280, hero.width)
+        assertEquals(720, hero.height)
+    }
+
+    @Test
+    fun testPocketSizeResolverUsesLocalFileBytesWithoutEstimating() {
+        val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
+        val repository = PocketRepository(context, scope)
+        val file = File(context.cacheDir, "pocket-size-check.bin")
+        file.writeBytes(ByteArray(12 * 1024))
+
+        val item = MediaInboxItem(
+            id = "local-size-check",
+            title = "local.bin",
+            localUri = file.absolutePath,
+            sourceUrl = "",
+            isVideo = false
+        )
+
+        assertEquals(file.length(), repository.resolveItemSizeBytes(item))
+        assertTrue(repository.itemMatchesSize(item, 10))
+        file.delete()
     }
 }
