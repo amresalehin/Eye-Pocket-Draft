@@ -747,13 +747,16 @@ class PocketRepository(
                 val metadataItems = meta.mediaItems.filterNot { item ->
                     item.sourceUrl.contains("google.com/s2/favicons", ignoreCase = true)
                 }
-                val newItems = if (latest.items.isEmpty() && metadataItems.isNotEmpty()) {
+                val retainedItems = latest.items.filterNot { item ->
+                    item.sourceUrl.contains("google.com/s2/favicons", ignoreCase = true)
+                }
+                val newItems = if (retainedItems.isEmpty() && metadataItems.isNotEmpty()) {
                     metadataItems
-                } else if (latest.items.isNotEmpty()) {
+                } else if (retainedItems.isNotEmpty()) {
                     if (metadataItems.isNotEmpty()) {
-                        MediaNormalizer.deduplicateMediaInboxItems(latest.items + metadataItems)
+                        MediaNormalizer.deduplicateMediaInboxItems(retainedItems + metadataItems)
                     } else {
-                        latest.items
+                        retainedItems
                     }
                 } else {
                     emptyList()
@@ -769,11 +772,11 @@ class PocketRepository(
                     metadataPreview != null -> metadataPreview
                     else -> newItems.firstOrNull { !it.isVideo && !it.isStream && it.sourceUrl.isNotBlank() }?.sourceUrl
                         ?: newItems.firstOrNull { it.sourceUrl.isNotBlank() }?.sourceUrl
-                        ?: latest.previewImageUrl
+                        ?: latest.previewImageUrl.takeIf { !it.contains("google.com/s2/favicons", ignoreCase = true) }.orEmpty()
                 }
 
                 if (newTitle != latest.title || newDesc != latest.description || newPreview != latest.previewImageUrl ||
-                    newDomain != latest.sourceDomain || newItems.size != latest.items.size) {
+                    newDomain != latest.sourceDomain || newItems != latest.items) {
                     val updated = latest.copy(
                         title = newTitle,
                         description = newDesc,
@@ -831,21 +834,28 @@ class PocketRepository(
 
                 // Resolve media items: merge new candidates with existing cached items
                 // Groups CDN size variants, selects the largest variant, and prioritizes video streams
+                val retainedItems = current.items.filterNot { item ->
+                    item.sourceUrl.contains("google.com/s2/favicons", ignoreCase = true)
+                }
                 val resolvedItems = if (newCandidates.isNotEmpty()) {
-                    val combined = newCandidates + current.items
+                    val combined = newCandidates + retainedItems
                     MediaNormalizer.deduplicateMediaInboxItems(combined).take(60)
                 } else {
-                    // Preserve existing cached media if refresh returned empty
-                    current.items
+                    // Preserve existing real media while removing generic site-icon pseudo-items.
+                    retainedItems
                 }
 
-                val newPreview = when {
-                    meta.previewImageUrl.isNotBlank() -> meta.previewImageUrl
-                    resolvedItems.isNotEmpty() -> resolvedItems.firstOrNull { !it.isVideo }?.sourceUrl
-                        ?: resolvedItems.firstOrNull()?.sourceUrl
-                        ?: current.previewImageUrl
-                    else -> current.previewImageUrl
+                val metadataPreview = meta.previewImageUrl.takeIf {
+                    it.isNotBlank() && !it.contains("google.com/s2/favicons", ignoreCase = true)
                 }
+                val currentPreview = current.previewImageUrl.takeIf {
+                    it.isNotBlank() && !it.contains("google.com/s2/favicons", ignoreCase = true)
+                }
+                val newPreview = metadataPreview
+                    ?: resolvedItems.firstOrNull { !it.isVideo && !it.isStream && it.sourceUrl.isNotBlank() }?.sourceUrl
+                    ?: resolvedItems.firstOrNull { it.sourceUrl.isNotBlank() }?.sourceUrl
+                    ?: currentPreview
+                    ?: ""
 
                 val cleanDomain = current.sourceDomain.ifBlank { meta.domain }
                 val isTitleDefault = current.title.isBlank() ||
@@ -856,7 +866,7 @@ class PocketRepository(
                 val updated = current.copy(
                     title = if (isTitleDefault && meta.title.isNotBlank()) meta.title else current.title,
                     description = if (current.description.isBlank() && meta.description.isNotBlank()) meta.description else current.description,
-                    previewImageUrl = if (newPreview.isNotBlank()) newPreview else current.previewImageUrl,
+                    previewImageUrl = newPreview,
                     sourceDomain = cleanDomain,
                     items = resolvedItems
                 )
