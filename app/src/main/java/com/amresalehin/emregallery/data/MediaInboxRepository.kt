@@ -19,7 +19,9 @@ data class MediaInboxItem(
     val isStream: Boolean = false,
     val format: String = "",
     val sizeBytes: Long = 0L,
-    val dateAddedMillis: Long = System.currentTimeMillis()
+    val dateAddedMillis: Long = System.currentTimeMillis(),
+    val width: Int = 0,
+    val height: Int = 0
 )
 
 data class MediaInboxStack(
@@ -79,7 +81,9 @@ class MediaInboxRepository(private val context: Context) {
                             isStream = itmObj.optBoolean("isStream", false),
                             format = itmObj.optString("format", ""),
                             sizeBytes = itmObj.optLong("sizeBytes", 0L),
-                            dateAddedMillis = itmObj.optLong("dateAddedMillis", timestamp)
+                            dateAddedMillis = itmObj.optLong("dateAddedMillis", timestamp),
+                            width = itmObj.optInt("width", 0),
+                            height = itmObj.optInt("height", 0)
                         )
                     )
                 }
@@ -161,6 +165,8 @@ class MediaInboxRepository(private val context: Context) {
                             put("format", itm.format)
                             put("sizeBytes", itm.sizeBytes)
                             put("dateAddedMillis", itm.dateAddedMillis)
+                            put("width", itm.width)
+                            put("height", itm.height)
                         }
                         itemsArr.put(itmObj)
                     }
