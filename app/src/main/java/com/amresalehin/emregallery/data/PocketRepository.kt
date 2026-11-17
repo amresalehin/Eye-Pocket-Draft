@@ -922,8 +922,9 @@ class PocketRepository(
     fun isDeepScanning(bookmarkId: String): Boolean = _activeDeepScanId.value == bookmarkId
 
     /**
-     * Starts an on-demand hardware-accelerated deep scan for a bookmark.
-     * Capped at 30 seconds with automatic scroll and real-time incremental media discovery.
+     * Starts a browser-backed deep scan for a bookmark.
+     * Continues until the page is exhausted, memory protection stops it, or the user stops it.
+     * Newly discovered media is merged and checkpointed incrementally.
      */
     fun startDeepScan(bookmarkId: String, context: Context = this.context) {
         val target = _bookmarks.value.find { it.id == bookmarkId } ?: return
