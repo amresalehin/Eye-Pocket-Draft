@@ -54,6 +54,29 @@ object MediaClassifier {
         "range", "bytestart", "byteend", "bytes", "rn", "sq", "live", "cpn", "sver", "chunk", "seg", "part"
     )
 
+    // Bookmark URL matching is intentionally much more conservative than media-asset
+    // deduplication. Only remove well-known analytics parameters; never discard parameters
+    // that may identify a resource, an application route, or a signed URL.
+    private val BOOKMARK_TRACKING_QUERY_PARAMS = setOf(
+        "fbclid", "gclid", "dclid", "msclkid", "ttclid", "twclid",
+        "li_fat_id", "igshid", "mc_cid", "mc_eid", "gbraid", "wbraid",
+        "yclid", "epik", "mibextid", "si", "_ga", "_gl", "_hsenc",
+        "_hsmi", "mkt_tok", "vero_conv", "vero_id", "oly_anon_id",
+        "oly_enc_id", "rb_clickid", "s_cid", "scid", "s_kwcid"
+    )
+
+    // If any of these are present, keep the complete query string and its order.
+    // This protects signed URLs, expiring links, authenticated links and SAS URLs.
+    private val BOOKMARK_SIGNED_QUERY_PARAMS = setOf(
+        "sig", "signature", "x-amz-signature", "x-amz-credential",
+        "x-amz-security-token", "x-goog-signature", "x-goog-credential",
+        "awsaccesskeyid", "key-pair-id", "policy", "token", "access_token",
+        "auth", "authorization", "jwt", "hmac", "hash", "expires",
+        "expiry", "se", "sp", "sv", "sr", "st", "ske", "skt", "sks",
+        "skv", "hdnea", "hdnts", "session", "sessionid", "nonce",
+        "code", "state"
+    )
+
     /**
      * Checks if a string is a substantial, legitimate Base64 inline data URI (e.g. artwork, canvas exports),
      * while rejecting tiny spacer GIFs, 1x1 transparent tracking pixels, and empty vectors.
@@ -788,6 +811,101 @@ object MediaClassifier {
     /**
      * Creates a canonical deduplication key by removing non-functional tracking query parameters.
      */
+    /**
+     * Produces a conservative identity key for saved web pages.
+     *
+     * Unlike media deduplication, this does not rewrite CDN paths, collapse image
+     * variants, remove generic ref/source parameters, or discard URL fragments.
+     * It normalizes host casing, default ports, dot segments and harmless query-order
+     * differences, and removes only well-known analytics/tracking parameters.
+     */
+    fun bookmarkDeduplicationKey(rawUrl: String): String {
+        val trimmed = rawUrl.trim()
+        if (trimmed.isBlank()) return ""
+
+        return try {
+            val candidate = when {
+                trimmed.startsWith("//") -> "https:" + trimmed
+                trimmed.startsWith("http://", ignoreCase = true) ||
+                    trimmed.startsWith("https://", ignoreCase = true) -> trimmed
+                else -> "https://" + trimmed
+            }
+
+            val uri = URI(candidate)
+            val scheme = uri.scheme?.lowercase(Locale.ROOT) ?: return trimmed
+            if (scheme != "http" && scheme != "https") return trimmed
+
+            val host = uri.host?.lowercase(Locale.ROOT) ?: return trimmed
+            val port = when {
+                scheme == "http" && uri.port == 80 -> -1
+                scheme == "https" && uri.port == 443 -> -1
+                else -> uri.port
+            }
+            val normalizedPath = uri.normalize().rawPath.orEmpty().ifBlank { "/" }
+            val userInfo = uri.rawUserInfo?.let { it + "@" } ?: ""
+            val authorityHost = if (host.contains(":") && !host.startsWith("[")) {
+                "[" + host + "]"
+            } else {
+                host
+            }
+            val authority = userInfo + authorityHost + if (port >= 0) ":" + port else ""
+
+            fun queryKey(parameter: String): String {
+                val rawKey = parameter.substringBefore("=")
+                return runCatching {
+                    java.net.URLDecoder.decode(rawKey.replace("+", "%2B"), "UTF-8")
+                }.getOrDefault(rawKey).lowercase(Locale.ROOT)
+            }
+
+            val queryParts = uri.rawQuery
+                ?.split("&")
+                ?.filter { it.isNotEmpty() }
+                .orEmpty()
+            val queryKeys = queryParts.map { queryKey(it) }
+            val hasSignedParameters = queryKeys.any { key ->
+                key in BOOKMARK_SIGNED_QUERY_PARAMS ||
+                    key.startsWith("x-amz-") ||
+                    key.startsWith("x-goog-")
+            }
+
+            val retainedQueryParts = if (hasSignedParameters) {
+                queryParts
+            } else {
+                queryParts.filterNot { parameter ->
+                    val key = queryKey(parameter)
+                    key in BOOKMARK_TRACKING_QUERY_PARAMS || key.startsWith("utm_")
+                }
+            }
+
+            // Query parameter order is normally immaterial, but repeated keys can be
+            // order-sensitive on some endpoints. Preserve the original order in that case.
+            val hasRepeatedKeys = retainedQueryParts
+                .map { queryKey(it) }
+                .groupingBy { it }
+                .eachCount()
+                .values
+                .any { it > 1 }
+
+            val canonicalQueryParts = if (hasSignedParameters || hasRepeatedKeys) {
+                retainedQueryParts
+            } else {
+                retainedQueryParts.sortedBy { queryKey(it) }
+            }
+
+            val querySuffix = if (canonicalQueryParts.isEmpty()) {
+                ""
+            } else {
+                "?" + canonicalQueryParts.joinToString("&")
+            }
+            val fragmentSuffix = uri.rawFragment?.let { "#" + it } ?: ""
+
+            scheme + "://" + authority + normalizedPath + querySuffix + fragmentSuffix
+        } catch (_: Exception) {
+            // Invalid, opaque, local and non-HTTP URLs retain exact identity.
+            trimmed
+        }
+    }
+
     fun canonicalKey(url: String): String = deduplicationKey(url)
 
     /**
