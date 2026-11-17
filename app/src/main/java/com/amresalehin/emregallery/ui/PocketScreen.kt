@@ -1000,14 +1000,22 @@ fun PocketBookmarkStaggeredCard(
 
     val firstMedia = stack.items.firstOrNull()
     val mediaModel = remember(firstMedia, stack.previewImageUrl) {
-        firstMedia?.let {
-            if (it.localUri.isNotBlank()) {
-                val f = File(it.localUri.removePrefix("file://"))
-                if (f.exists()) f else it.sourceUrl.ifBlank { it.localUri }
-            } else {
-                it.sourceUrl
+        // A bookmark's Open Graph/website preview is its primary visual identity.
+        // Discovered media is only a fallback when the page has no preview image.
+        stack.previewImageUrl.takeIf { it.isNotBlank() } ?: firstMedia?.let { item ->
+            when {
+                item.localUri.startsWith("content://", ignoreCase = true) -> item.localUri
+                item.localUri.startsWith("file://", ignoreCase = true) -> {
+                    val file = File(item.localUri.removePrefix("file://"))
+                    if (file.exists()) file.absolutePath else item.sourceUrl.ifBlank { item.localUri }
+                }
+                item.localUri.startsWith("/") -> {
+                    val file = File(item.localUri)
+                    if (file.exists()) file.absolutePath else item.sourceUrl.ifBlank { item.localUri }
+                }
+                else -> item.sourceUrl.ifBlank { item.localUri }
             }
-        } ?: stack.previewImageUrl.takeIf { it.isNotBlank() }
+        }
     }
 
     val faviconUrl = remember(stack.sourceDomain) {
