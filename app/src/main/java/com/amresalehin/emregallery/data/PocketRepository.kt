@@ -141,52 +141,88 @@ class PocketRepository(
     }
 
     fun parseMediaItemDimensions(item: MediaInboxItem): Pair<Int?, Int?> {
-        val (w, h) = parseDimensionsFromText("${item.title} ${item.sourceUrl}")
-        if (w != null || h != null) {
-            return w to h
+        var width = item.width.takeIf { it > 0 }
+        var height = item.height.takeIf { it > 0 }
+
+        // Retain dimensions supplied in extractor metadata or explicit resolution/URL hints.
+        val hinted = parseDimensionsFromText("${item.title} ${item.sourceUrl}")
+        width = width ?: hinted.first
+        height = height ?: hinted.second
+        if (width != null && height != null) return width to height
+
+        // Resolve real dimensions from a local image without decoding its full bitmap.
+        fun decodeBounds(path: String): Pair<Int?, Int?> {
+            val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            return try {
+                BitmapFactory.decodeFile(path, options)
+                if (options.outWidth > 0 && options.outHeight > 0) {
+                    options.outWidth to options.outHeight
+                } else null to null
+            } catch (_: Throwable) {
+                null to null
+            }
         }
+
         if (item.localUri.isNotBlank()) {
             try {
-                val path = item.localUri.removePrefix("file://")
-                val file = File(path)
-                if (file.exists() && file.isFile) {
-                    val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                    BitmapFactory.decodeFile(file.absolutePath, options)
-                    if (options.outWidth > 0 && options.outHeight > 0) {
-                        return options.outWidth to options.outHeight
+                val local = item.localUri
+                val bounds = when {
+                    local.startsWith("content://", ignoreCase = true) -> {
+                        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                        context.contentResolver.openInputStream(Uri.parse(local))?.use { stream ->
+                            BitmapFactory.decodeStream(stream, null, options)
+                        }
+                        if (options.outWidth > 0 && options.outHeight > 0) {
+                            options.outWidth to options.outHeight
+                        } else null to null
+                    }
+                    else -> {
+                        val path = local.removePrefix("file://")
+                        val file = File(path)
+                        if (file.exists() && file.isFile) decodeBounds(file.absolutePath) else null to null
                     }
                 }
-            } catch (_: Exception) {}
+                width = width ?: bounds.first
+                height = height ?: bounds.second
+                if (width != null && height != null) return width to height
+            } catch (_: Throwable) {}
         }
+
+        // Coil's disk cache contains the actual encoded image; inspect it only when already cached.
         if (item.sourceUrl.isNotBlank()) {
             try {
-                val diskCache = Coil.imageLoader(context).diskCache
-                val snapshot = diskCache?.openSnapshot(item.sourceUrl)
+                val snapshot = Coil.imageLoader(context).diskCache?.openSnapshot(item.sourceUrl)
                 if (snapshot != null) {
-                    val file = snapshot.data.toFile()
-                    if (file.exists() && file.length() > 0) {
-                        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                        BitmapFactory.decodeFile(file.absolutePath, options)
-                        snapshot.close()
-                        if (options.outWidth > 0 && options.outHeight > 0) {
-                            return options.outWidth to options.outHeight
+                    try {
+                        val cached = snapshot.data.toFile()
+                        if (cached.exists() && cached.length() > 0L) {
+                            val bounds = decodeBounds(cached.absolutePath)
+                            width = width ?: bounds.first
+                            height = height ?: bounds.second
                         }
-                    } else {
+                    } finally {
                         snapshot.close()
                     }
                 }
             } catch (_: Throwable) {}
         }
-        return null to null
+
+        return width to height
     }
 
+    /**
+     * Dimension filters are strict for images: every enabled threshold needs a known
+     * measurement, and that measurement must meet the threshold. Video, audio and
+     * stream items remain outside the image-dimension filter.
+     */
     fun itemMatchesDimensions(item: MediaInboxItem, minWidth: Int, minHeight: Int): Boolean {
         if (minWidth <= 0 && minHeight <= 0) return true
         if (item.isVideo || item.isAudio || item.isStream) return true
-        val (w, h) = parseMediaItemDimensions(item)
-        if (w != null && minWidth > 0 && w < minWidth) return false
-        if (h != null && minHeight > 0 && h < minHeight) return false
-        return true
+
+        val (width, height) = parseMediaItemDimensions(item)
+        val widthMatches = minWidth <= 0 || (width != null && width >= minWidth)
+        val heightMatches = minHeight <= 0 || (height != null && height >= minHeight)
+        return widthMatches && heightMatches
     }
 
     fun itemMatchesType(
@@ -220,32 +256,37 @@ class PocketRepository(
     }
 
     /**
-     * Accurately resolves the media item file size in bytes from local storage,
-     * Coil's persistent disk cache, explicit query hints, dimension metrics, or background network probe.
+     * Returns only a known byte count: supplied file size, local file/provider size,
+     * a cached encoded file size, an inline data-URI size, or a completed HEAD probe.
+     * It deliberately does not estimate remote file sizes from dimensions, type or URL hints.
+     * Unknown is returned as 0 and therefore fails any active minimum-size filter.
      */
     fun resolveItemSizeBytes(item: MediaInboxItem): Long {
         if (item.sizeBytes > 0L) {
+            sizeCache[item.id] = item.sizeBytes
+            if (item.sourceUrl.isNotBlank()) sizeCache[item.sourceUrl] = item.sizeBytes
             return item.sizeBytes
         }
+
         if (item.localUri.isNotBlank()) {
-            val localPath = item.localUri.removePrefix("file://")
-            val f = File(localPath)
-            if (f.exists() && f.isFile && f.length() > 0L) {
-                val len = f.length()
-                sizeCache[item.id] = len
-                if (item.sourceUrl.isNotBlank()) sizeCache[item.sourceUrl] = len
-                return len
-            }
-            if (item.localUri.startsWith("content://")) {
+            val local = item.localUri
+            if (local.startsWith("content://", ignoreCase = true)) {
                 runCatching {
-                    val uri = Uri.parse(item.localUri)
-                    context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
-                        val statSize = pfd.statSize
-                        if (statSize > 0L) {
-                            sizeCache[item.id] = statSize
-                            return statSize
+                    context.contentResolver.openFileDescriptor(Uri.parse(local), "r")?.use { pfd ->
+                        if (pfd.statSize > 0L) {
+                            sizeCache[item.id] = pfd.statSize
+                            return pfd.statSize
                         }
                     }
+                }
+            } else {
+                val path = local.removePrefix("file://")
+                val file = File(path)
+                if (file.exists() && file.isFile && file.length() > 0L) {
+                    val length = file.length()
+                    sizeCache[item.id] = length
+                    if (item.sourceUrl.isNotBlank()) sizeCache[item.sourceUrl] = length
+                    return length
                 }
             }
         }
@@ -253,79 +294,64 @@ class PocketRepository(
         val url = item.sourceUrl
         if (url.isBlank()) return 0L
 
-        sizeCache[url]?.let { if (it > 0L) return it }
-        sizeCache[item.id]?.let { if (it > 0L) return it }
+        sizeCache[url]?.takeIf { it > 0L }?.let { return it }
+        sizeCache[item.id]?.takeIf { it > 0L }?.let { return it }
 
         if (url.startsWith("data:", ignoreCase = true)) {
             val payload = url.substringAfter(',', "")
             if (payload.isNotBlank()) {
-                val len = if (url.contains(";base64", ignoreCase = true)) {
-                    (payload.length * 3L) / 4L
+                val estimated = if (url.contains(";base64", ignoreCase = true)) {
+                    val padding = payload.takeLastWhile { it == '=' }.length.coerceAtMost(2)
+                    (payload.length.toLong() * 3L) / 4L - padding
                 } else {
-                    payload.length.toLong()
+                    runCatching { java.net.URLDecoder.decode(payload, "UTF-8").toByteArray(Charsets.UTF_8).size.toLong() }
+                        .getOrDefault(0L)
                 }
-                if (len > 0L) {
-                    sizeCache[url] = len
-                    return len
+                if (estimated > 0L) {
+                    sizeCache[url] = estimated
+                    return estimated
                 }
-            }
-        }
-
-        val sizeParamMatch = Regex("""[?&](?:size|filesize|bytes|length|len)=(\d+)""", RegexOption.IGNORE_CASE).find(url)
-        if (sizeParamMatch != null) {
-            val parsed = sizeParamMatch.groupValues[1].toLongOrNull()
-            if (parsed != null && parsed > 0L) {
-                sizeCache[url] = parsed
-                return parsed
             }
         }
 
         try {
-            val diskCache = Coil.imageLoader(context).diskCache
-            val snapshot = diskCache?.openSnapshot(url)
+            val snapshot = Coil.imageLoader(context).diskCache?.openSnapshot(url)
             if (snapshot != null) {
-                val len = snapshot.data.toFile().length()
-                snapshot.close()
-                if (len > 0L) {
-                    sizeCache[url] = len
-                    return len
+                try {
+                    val cachedFile = snapshot.data.toFile()
+                    val length = if (cachedFile.exists()) cachedFile.length() else 0L
+                    if (length > 0L) {
+                        sizeCache[url] = length
+                        sizeCache[item.id] = length
+                        return length
+                    }
+                } finally {
+                    snapshot.close()
                 }
             }
         } catch (_: Throwable) {}
 
-        val (w, h) = parseMediaItemDimensions(item)
-        if (w != null && h != null && w > 0 && h > 0) {
-            val isItemVideo = item.isVideo || item.isStream || item.format.equals("MP4", true) || url.endsWith(".mp4", true)
-            val isItemSvg = MediaClassifier.isSvg(url, format = item.format)
-            val isItemPng = item.format.equals("PNG", true) || url.endsWith(".png", true)
-            val estimated = when {
-                isItemSvg -> 12_000L
-                isItemVideo -> ((w.toLong() * h.toLong() * 2L).coerceIn(800_000L, 25_000_000L))
-                isItemPng -> ((w.toLong() * h.toLong() * 65L) / 100L).coerceAtLeast(4_000L)
-                else -> ((w.toLong() * h.toLong() * 28L) / 100L).coerceAtLeast(3_000L)
-            }
-            if (estimated > 0L) {
-                sizeCache[url] = estimated
-                triggerAsyncHeadSize(url, item.id)
-                return estimated
-            }
-        }
-
         triggerAsyncHeadSize(url, item.id)
+        return 0L
+    }
 
-        val defaultEstimate = when {
-            item.isVideo || item.isStream -> 2_500_000L
-            MediaClassifier.isSvg(url, format = item.format) -> 12_000L
-            item.format.equals("PNG", true) || url.endsWith(".png", true) -> 350_000L
-            item.format.equals("GIF", true) || url.endsWith(".gif", true) -> 750_000L
-            else -> 180_000L
-        }
-        return defaultEstimate
+    /**
+     * Evaluates a strict minimum-size rule. Unknown sizes do not pass.
+     */
+    fun itemMatchesSize(item: MediaInboxItem, minSizeKb: Int): Boolean {
+        if (minSizeKb <= 0) return true
+        val minSizeBytes = minSizeKb.toLong() * 1024L
+        val actualSize = resolveItemSizeBytes(item)
+        return actualSize > 0L && actualSize >= minSizeBytes
     }
 
     private fun triggerAsyncHeadSize(url: String, itemId: String) {
         if (!url.startsWith("http://", ignoreCase = true) && !url.startsWith("https://", ignoreCase = true)) return
         if (!activeProbes.add(url)) return
+        if (activeProbes.size > MAX_ACTIVE_SIZE_PROBES) {
+            activeProbes.remove(url)
+            return
+        }
         coroutineScope.launch {
             try {
                 val result = OkHttpDownloader.probeDirectMedia(url)
@@ -392,50 +418,14 @@ class PocketRepository(
         minSizeKb: Int = _minSizeKb.value
     ): MediaInboxStack {
         val filteredItems = stack.items.filter { item ->
-            val typeOk = itemMatchesType(item, showSvg, showVideos, showStreams, showPng, showGif)
-            val dimOk = itemMatchesDimensions(item, minWidth, minHeight)
-            val sizeOk = itemMatchesSize(item, minSizeKb)
-            typeOk && dimOk && sizeOk
+            itemMatchesType(item, showSvg, showVideos, showStreams, showPng, showGif) &&
+                itemMatchesDimensions(item, minWidth, minHeight) &&
+                itemMatchesSize(item, minSizeKb)
         }
 
-        val browserPreview = stack.previewImageUrl.ifBlank {
-            stack.items.firstOrNull()?.sourceUrl ?: ""
-        }
-
-        val previewIsSvg = stack.previewImageUrl.isNotBlank() && MediaClassifier.isSvg(stack.previewImageUrl)
-        val previewDimMatch = if (stack.previewImageUrl.isNotBlank() && (minWidth > 0 || minHeight > 0)) {
-            val (pw, ph) = parseDimensionsFromText(stack.previewImageUrl)
-            (pw == null || minWidth <= 0 || pw >= minWidth) && (ph == null || minHeight <= 0 || ph >= minHeight)
-        } else true
-
-        val previewTypeMatch = if (previewIsSvg) showSvg else true
-
-        val previewSizeMatch = if (stack.previewImageUrl.isNotBlank() && minSizeKb > 0) {
-            val dummyItem = MediaInboxItem(
-                id = "preview_${stack.id}",
-                title = stack.title,
-                localUri = "",
-                sourceUrl = stack.previewImageUrl,
-                isVideo = false
-            )
-            itemMatchesSize(dummyItem, minSizeKb)
-        } else true
-
-        val previewValid = previewTypeMatch && previewDimMatch && previewSizeMatch
-
-        // If no media is able to fulfil the criteria, show the browser preview
-        val sanitizedPreview = if (filteredItems.isNotEmpty()) {
-            if (previewValid && stack.previewImageUrl.isNotBlank()) {
-                stack.previewImageUrl
-            } else {
-                filteredItems.firstOrNull()?.sourceUrl ?: ""
-            }
-        } else {
-            // No media fulfilled the criteria -> show browser preview
-            browserPreview
-        }
-
-        return stack.copy(items = filteredItems, previewImageUrl = sanitizedPreview)
+        // previewImageUrl is page artwork (e.g. Open Graph cover), not a discovered
+        // downloadable candidate. Keep it intact; the media filters apply only to items.
+        return stack.copy(items = filteredItems)
     }
 
     /**
@@ -490,7 +480,9 @@ class PocketRepository(
                                 isStream = itmObj.optBoolean("isStream", false),
                                 format = itmObj.optString("format", ""),
                                 sizeBytes = itmObj.optLong("sizeBytes", 0L),
-                                dateAddedMillis = itmObj.optLong("dateAddedMillis", System.currentTimeMillis())
+                                dateAddedMillis = itmObj.optLong("dateAddedMillis", System.currentTimeMillis()),
+                                width = itmObj.optInt("width", 0),
+                                height = itmObj.optInt("height", 0)
                             )
                         )
                     }
@@ -583,6 +575,8 @@ class PocketRepository(
                             put("format", itm.format)
                             put("sizeBytes", itm.sizeBytes)
                             put("dateAddedMillis", itm.dateAddedMillis)
+                            put("width", itm.width)
+                            put("height", itm.height)
                         }
                         itemsArr.put(itmObj)
                     }
@@ -973,6 +967,7 @@ class PocketRepository(
         const val DEFAULT_MIN_WIDTH = 480
         const val DEFAULT_MIN_HEIGHT = 540
         const val DEFAULT_MIN_SIZE_KB = 10
+        private const val MAX_ACTIVE_SIZE_PROBES = 8
 
         @Volatile
         private var INSTANCE: PocketRepository? = null
