@@ -3,6 +3,7 @@ package com.amresalehin.emregallery
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import com.amresalehin.emregallery.data.LinkMetadataFetcher
+import com.amresalehin.emregallery.data.MediaInboxItem
 import com.amresalehin.emregallery.data.MediaInboxStack
 import com.amresalehin.emregallery.data.PocketRepository
 import kotlinx.coroutines.CoroutineScope
@@ -274,5 +275,151 @@ class LinkMetadataUnitTest {
         assertEquals("Do not replace an enriched title with a generic domain title", "A useful article", duplicate.title)
         assertEquals("Keep the existing description", "The original description", duplicate.description)
         assertEquals("Keep the existing preview", "https://example.com/cover.jpg", duplicate.previewImageUrl)
+    }
+
+    @Test
+    fun testPocketDimensionFiltersRejectUnknownAndBelowThresholdMeasurements() {
+        val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
+        val repository = PocketRepository(context, scope)
+
+        val exactMinimum = MediaInboxItem(
+            id = "exact",
+            title = "wallpaper.jpg",
+            localUri = "",
+            sourceUrl = "",
+            isVideo = false,
+            width = 480,
+            height = 540,
+            sizeBytes = 10L * 1024L
+        )
+        val tooSmallWidth = exactMinimum.copy(id = "small-width", width = 479)
+        val missingHeight = exactMinimum.copy(id = "missing-height", height = 0)
+        val unknownDimensions = MediaInboxItem(
+            id = "unknown-dimensions",
+            title = "unmeasured.jpg",
+            localUri = "",
+            sourceUrl = "",
+            isVideo = false
+        )
+        val videoWithoutDimensions = MediaInboxItem(
+            id = "video",
+            title = "clip.mp4",
+            localUri = "",
+            sourceUrl = "",
+            isVideo = true,
+            format = "MP4"
+        )
+
+        assertTrue(repository.itemMatchesDimensions(exactMinimum, 480, 540))
+        assertFalse(repository.itemMatchesDimensions(tooSmallWidth, 480, 540))
+        assertFalse(repository.itemMatchesDimensions(missingHeight, 480, 540))
+        assertFalse(repository.itemMatchesDimensions(unknownDimensions, 480, 540))
+        assertTrue("Image dimension filters do not apply to video/audio/stream entries", repository.itemMatchesDimensions(videoWithoutDimensions, 480, 540))
+        assertTrue("Zero thresholds mean any dimensions", repository.itemMatchesDimensions(unknownDimensions, 0, 0))
+    }
+
+    @Test
+    fun testPocketMinimumSizeUsesKnownBytesAndRejectsEstimates() {
+        val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
+        val repository = PocketRepository(context, scope)
+
+        val exactMinimum = MediaInboxItem(
+            id = "exact-size",
+            title = "image.jpg",
+            localUri = "",
+            sourceUrl = "",
+            isVideo = false,
+            sizeBytes = 10L * 1024L
+        )
+        val oneByteBelow = exactMinimum.copy(id = "below-size", sizeBytes = 10L * 1024L - 1L)
+        val unknownSize = MediaInboxItem(
+            id = "unknown-size",
+            title = "large_4000x3000.jpg",
+            localUri = "",
+            sourceUrl = "opaque://example.com/image.jpg?size=90000000",
+            isVideo = false,
+            sizeBytes = 0L
+        )
+
+        assertTrue(repository.itemMatchesSize(exactMinimum, 10))
+        assertFalse(repository.itemMatchesSize(oneByteBelow, 10))
+        assertEquals("Unknown size must remain unknown rather than receive an estimate", 0L, repository.resolveItemSizeBytes(unknownSize))
+        assertFalse("Estimated or URL-hint sizes must not pass a strict minimum", repository.itemMatchesSize(unknownSize, 10))
+        assertTrue(repository.itemMatchesSize(unknownSize, 0))
+    }
+
+    @Test
+    fun testSanitizeStackFiltersUnknownCandidatesButPreservesPagePreview() {
+        val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
+        val repository = PocketRepository(context, scope)
+        val stack = MediaInboxStack(
+            id = "preview-filter-test",
+            title = "Article with preview",
+            sourceDomain = "example.com",
+            sourceUrl = "https://example.com/article",
+            items = listOf(
+                MediaInboxItem(
+                    id = "known",
+                    title = "cover.jpg",
+                    localUri = "",
+                    sourceUrl = "",
+                    isVideo = false,
+                    width = 1200,
+                    height = 800,
+                    sizeBytes = 200L * 1024L
+                ),
+                MediaInboxItem(
+                    id = "unknown",
+                    title = "unmeasured.jpg",
+                    localUri = "",
+                    sourceUrl = "",
+                    isVideo = false
+                )
+            ),
+            previewImageUrl = "https://example.com/og-cover.jpg"
+        )
+
+        val sanitized = repository.sanitizeStack(
+            stack = stack,
+            minWidth = 480,
+            minHeight = 540,
+            minSizeKb = 10
+        )
+
+        assertEquals(listOf("known"), sanitized.items.map { it.id })
+        assertEquals(
+            "The page preview is separate from downloadable candidates and must remain available",
+            "https://example.com/og-cover.jpg",
+            sanitized.previewImageUrl
+        )
+    }
+
+    @Test
+    fun testPocketItemDimensionsAndSizeSurvivePersistence() {
+        val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
+        val repository = PocketRepository(context, scope)
+        val saved = repository.addBookmark(
+            title = "Measured image",
+            url = "https://example.com/measured",
+            autoFetchMetadata = false,
+            initialItems = listOf(
+                MediaInboxItem(
+                    id = "measured",
+                    title = "photo.jpg",
+                    localUri = "",
+                    sourceUrl = "https://cdn.example.com/photo.jpg",
+                    isVideo = false,
+                    sizeBytes = 42_000L,
+                    width = 1600,
+                    height = 1200
+                )
+            )
+        )
+
+        val restoredRepository = PocketRepository(context, scope)
+        val restored = restoredRepository.bookmarks.value.first { it.id == saved.id }.items.single()
+        assertEquals(1600, restored.width)
+        assertEquals(1200, restored.height)
+        assertEquals(42_000L, restored.sizeBytes)
     }
 }
