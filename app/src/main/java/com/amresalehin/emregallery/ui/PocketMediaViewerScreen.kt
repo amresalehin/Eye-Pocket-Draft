@@ -652,9 +652,10 @@ private fun executeSaveMedia(
             ?: com.amresalehin.emregallery.data.MediaClassifier.extractYouTubeVideoId(downloadUrl)
         val stableMediaIdentity = youtubeVideoId?.let { "youtube:$it" } ?: downloadUrl
         val sourceSupport = GalleryDlEngine.checkSupport(sourcePageUrl)
-        val requiresAudio = item.requiresAudio || (
+        var requiresAudio = item.requiresAudio || (
             item.isVideo && sourceSupport.isSupported && sourceSupport.extractorEngine == "yt-dlp"
         )
+        var requiresVideo = (item.isVideo && !item.isAudio) || (item.isStream && !item.isAudio)
         val fileName = OkHttpDownloader.generateStableMediaFileName(stableMediaIdentity, requestedFileName)
         val thumb = if (item.localUri.isNotBlank()) item.localUri else (item.sourceUrl.ifBlank { stack.previewImageUrl })
         val effectiveDomain = stack.sourceDomain.ifBlank { OkHttpDownloader.extractDomain(stack.sourceUrl.ifBlank { downloadUrl }) }
@@ -686,8 +687,8 @@ private fun executeSaveMedia(
             val copied = withContext(Dispatchers.IO) {
                 val tracksValid = validateSavedMediaTracks(
                     localFile,
-                    requireVideo = item.isVideo && !item.isAudio,
-                    requireAudio = item.isAudio || requiresAudio
+                    requireVideo = requiresVideo,
+                    requireAudio = requiresAudio
                 )
                 if (!tracksValid) {
                     false
@@ -730,8 +731,8 @@ private fun executeSaveMedia(
                     streamUrl = downloadUrl,
                     outputFile = targetFile,
                     context = context,
-                    requireVideo = item.isVideo && !item.isAudio,
-                    requireAudio = item.isAudio || requiresAudio
+                    requireVideo = requiresVideo,
+                    requireAudio = requiresAudio
                 )
             }
             if (remuxResult.isSuccess && targetFile.exists() && targetFile.length() > 0L) {
@@ -772,11 +773,15 @@ private fun executeSaveMedia(
                         domain = effectiveDomain,
                         identityUrl = downloadUrl
                     )
+                    // Keep resolver-discovered requirements even if this attempt fails.
+                    // A later raw-URL fallback must not silently downgrade a muxed video.
+                    requiresVideo = requiresVideo || result.requiresVideo
+                    requiresAudio = requiresAudio || result.requiresAudio
                     val candidate = result.file ?: return null
                     val valid = validateSavedMediaTracks(
                         candidate,
-                        requireVideo = (item.isVideo && !item.isAudio) || result.requiresVideo,
-                        requireAudio = item.isAudio || requiresAudio || result.requiresAudio
+                        requireVideo = requiresVideo,
+                        requireAudio = requiresAudio
                     )
                     if (!valid) {
                         candidate.delete()
@@ -836,8 +841,8 @@ private fun executeSaveMedia(
                 val validTracks = withContext(Dispatchers.IO) {
                     validateSavedMediaTracks(
                         result.file,
-                        requireVideo = item.isVideo && !item.isAudio,
-                        requireAudio = item.isAudio || requiresAudio
+                        requireVideo = requiresVideo,
+                        requireAudio = requiresAudio
                     )
                 }
                 if (!validTracks) {
@@ -870,10 +875,10 @@ private fun executeSaveMedia(
             id = itemId,
             url = downloadUrl,
             title = displayTitle,
-            isVideo = item.isVideo,
+            isVideo = item.isVideo || requiresVideo,
             isAudio = item.isAudio,
             isStream = isStreamUrl,
-            category = if (item.isVideo) MediaCategory.VIDEOS else MediaCategory.IMAGES,
+            category = if (item.isVideo || requiresVideo) MediaCategory.VIDEOS else MediaCategory.IMAGES,
             format = item.format.ifBlank { ext.uppercase(Locale.ROOT) },
             source = "Bookmark Viewer",
             metadata = if (requiresAudio) mapOf("requires_audio" to "true") else emptyMap()
