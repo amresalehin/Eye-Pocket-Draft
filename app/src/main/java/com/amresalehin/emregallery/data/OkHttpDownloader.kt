@@ -491,9 +491,7 @@ object OkHttpDownloader {
      */
     fun generateDeterministicId(mediaUrl: String, fileName: String): String {
         val hash = runCatching {
-            val md = java.security.MessageDigest.getInstance("SHA-256")
-            val bytes = md.digest(mediaUrl.toByteArray(Charsets.UTF_8))
-            bytes.take(8).joinToString("") { "%02x".format(it) }
+            MediaNormalizer.stableIdentityHash(mediaUrl)
         }.getOrDefault(Integer.toHexString(mediaUrl.hashCode()))
         val base = fileName.substringBeforeLast('.').replace(Regex("[^a-zA-Z0-9_-]"), "_").take(32)
         val ext = fileName.substringAfterLast('.', "")

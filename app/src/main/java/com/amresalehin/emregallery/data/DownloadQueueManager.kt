@@ -43,7 +43,9 @@ object DownloadQueueManager {
     }
 
     fun markDownloadCompleted(itemId: String? = null) {
-        if (itemId != null) activeItemIds.remove(itemId)
+        // Worker completion and explicit cancellation can race. Only the first completion
+        // for a tracked item decrements the active count.
+        if (itemId != null && !activeItemIds.remove(itemId)) return
         val remaining = activeDownloadCount.decrementAndGet()
         if (remaining <= 0) {
             activeDownloadCount.set(0)
@@ -90,6 +92,10 @@ object DownloadQueueManager {
             .putBoolean(MediaDownloadWorker.KEY_IS_VIDEO, item.isVideo)
             .putBoolean(MediaDownloadWorker.KEY_IS_AUDIO, item.isAudio)
             .putBoolean(MediaDownloadWorker.KEY_IS_STREAM, item.isStream)
+            .putBoolean(
+                MediaDownloadWorker.KEY_REQUIRES_AUDIO,
+                item.metadata["requires_audio"].equals("true", ignoreCase = true)
+            )
             .putString(MediaDownloadWorker.KEY_FORMAT, item.format)
             .putString(MediaDownloadWorker.KEY_STACK_ID, sId)
             .putString(MediaDownloadWorker.KEY_STACK_TITLE, sTitle)
@@ -111,11 +117,14 @@ object DownloadQueueManager {
             .build()
 
         val dedupKey = MediaClassifier.deduplicationKey(item.url)
-        val uniqueWorkName = "download_${abs(dedupKey.hashCode())}"
+        val uniqueWorkName = "download_${MediaNormalizer.stableIdentityHash(item.url)}"
+        // Existing installations may still have active work under the old Int-hash name.
+        val legacyUniqueWorkName = "download_${abs(dedupKey.hashCode())}"
 
         val workManager = WorkManager.getInstance(context)
         val existingWorkList = runCatching {
-            workManager.getWorkInfosForUniqueWork(uniqueWorkName).get()
+            (workManager.getWorkInfosForUniqueWork(uniqueWorkName).get() +
+                workManager.getWorkInfosForUniqueWork(legacyUniqueWorkName).get()).distinctBy { it.id }
         }.getOrDefault(emptyList())
 
         val activeWork = existingWorkList.firstOrNull {
@@ -123,10 +132,12 @@ object DownloadQueueManager {
         }
 
         val finalWorkId: UUID
-        if (activeWork != null && !isRetry) {
-            // Re-use already active WorkManager request ID so pause/cancel references the running job
+        val shouldRecordActivity: Boolean
+        if (activeWork != null) {
+            // An existing worker can only complete its own item ID. Do not create a
+            // second queue record that will remain DOWNLOADING forever.
             finalWorkId = activeWork.id
-            activeItemIds.add(item.id)
+            shouldRecordActivity = activeWork.inputData.getString(MediaDownloadWorker.KEY_ITEM_ID) == item.id
         } else {
             finalWorkId = request.id
             workManager.enqueueUniqueWork(
@@ -135,25 +146,28 @@ object DownloadQueueManager {
                 request
             )
             markDownloadStarted(count = 1, itemId = item.id)
+            shouldRecordActivity = true
         }
 
         DownloadActivityManager.initialize(context)
-        DownloadActivityManager.recordQueued(
-            id = item.id,
-            title = item.title,
-            mediaUrl = item.url,
-            thumbnailUrl = item.thumbnailUrl ?: item.url,
-            isVideo = item.isVideo,
-            isAudio = item.isAudio,
-            isStream = item.isStream,
-            format = item.format,
-            workId = finalWorkId.toString(),
-            isRetry = isRetry,
-            stackId = sId,
-            stackTitle = sTitle,
-            sourceDomain = domain,
-            sourceUrl = url
-        )
+        if (shouldRecordActivity) {
+            DownloadActivityManager.recordQueued(
+                id = item.id,
+                title = item.title,
+                mediaUrl = item.url,
+                thumbnailUrl = item.thumbnailUrl ?: item.url,
+                isVideo = item.isVideo,
+                isAudio = item.isAudio,
+                isStream = item.isStream,
+                format = item.format,
+                workId = finalWorkId.toString(),
+                isRetry = isRetry,
+                stackId = sId,
+                stackTitle = sTitle,
+                sourceDomain = domain,
+                sourceUrl = url
+            )
+        }
 
         return finalWorkId
     }
@@ -175,6 +189,8 @@ object DownloadQueueManager {
         val workManager = WorkManager.getInstance(context)
         val distinctItems = MediaClassifier.deduplicateScrapedItems(items)
 
+        val activityItems = mutableListOf<ScrapedMediaItem>()
+        val activityWorkIds = mutableListOf<UUID>()
         val workIds = distinctItems.map { item ->
             val headersJson = serializeHeaders(item.downloadHeaders)
             val inputData = Data.Builder()
@@ -186,6 +202,10 @@ object DownloadQueueManager {
                 .putBoolean(MediaDownloadWorker.KEY_IS_VIDEO, item.isVideo)
                 .putBoolean(MediaDownloadWorker.KEY_IS_AUDIO, item.isAudio)
                 .putBoolean(MediaDownloadWorker.KEY_IS_STREAM, item.isStream)
+                .putBoolean(
+                    MediaDownloadWorker.KEY_REQUIRES_AUDIO,
+                    item.metadata["requires_audio"].equals("true", ignoreCase = true)
+                )
                 .putString(MediaDownloadWorker.KEY_FORMAT, item.format)
                 .putString(MediaDownloadWorker.KEY_STACK_ID, sId)
                 .putString(MediaDownloadWorker.KEY_STACK_TITLE, sTitle)
@@ -207,10 +227,12 @@ object DownloadQueueManager {
                 .build()
 
             val dedupKey = MediaClassifier.deduplicationKey(item.url)
-            val uniqueWorkName = "download_${abs(dedupKey.hashCode())}"
+            val uniqueWorkName = "download_${MediaNormalizer.stableIdentityHash(item.url)}"
+            val legacyUniqueWorkName = "download_${abs(dedupKey.hashCode())}"
 
             val existingWorkList = runCatching {
-                workManager.getWorkInfosForUniqueWork(uniqueWorkName).get()
+                (workManager.getWorkInfosForUniqueWork(uniqueWorkName).get() +
+                    workManager.getWorkInfosForUniqueWork(legacyUniqueWorkName).get()).distinctBy { it.id }
             }.getOrDefault(emptyList())
 
             val activeWork = existingWorkList.firstOrNull {
@@ -218,7 +240,11 @@ object DownloadQueueManager {
             }
 
             if (activeWork != null) {
-                activeItemIds.add(item.id)
+                // Never attach an untracked alias ID to an existing worker.
+                if (activeWork.inputData.getString(MediaDownloadWorker.KEY_ITEM_ID) == item.id) {
+                    activityItems.add(item)
+                    activityWorkIds.add(activeWork.id)
+                }
                 activeWork.id
             } else {
                 workManager.enqueueUniqueWork(
@@ -227,19 +253,23 @@ object DownloadQueueManager {
                     request
                 )
                 markDownloadStarted(count = 1, itemId = item.id)
+                activityItems.add(item)
+                activityWorkIds.add(request.id)
                 request.id
             }
         }
 
         DownloadActivityManager.initialize(context)
-        DownloadActivityManager.recordBatchQueued(
-            items = distinctItems,
-            workIds = workIds,
-            stackId = sId,
-            stackTitle = sTitle,
-            sourceDomain = domain,
-            sourceUrl = url
-        )
+        if (activityItems.isNotEmpty()) {
+            DownloadActivityManager.recordBatchQueued(
+                items = activityItems,
+                workIds = activityWorkIds,
+                stackId = sId,
+                stackTitle = sTitle,
+                sourceDomain = domain,
+                sourceUrl = url
+            )
+        }
 
         return workIds
     }
@@ -250,10 +280,15 @@ object DownloadQueueManager {
     }
 
     fun cancelDownload(context: Context, workId: UUID) {
-        runCatching {
-            WorkManager.getInstance(context).cancelWorkById(workId)
-        }
-        markDownloadCompleted()
+        val workManager = WorkManager.getInstance(context)
+        val itemId = runCatching {
+            workManager.getWorkInfoById(workId).get()?.inputData
+                ?.getString(MediaDownloadWorker.KEY_ITEM_ID)
+        }.getOrNull()
+        runCatching { workManager.cancelWorkById(workId) }
+        // Handles ENQUEUED work cancelled before doWork/finally can run; worker completion
+        // may race this call, but item-ID completion is idempotent.
+        if (!itemId.isNullOrBlank()) markDownloadCompleted(itemId)
     }
 
     fun cancelAll(context: Context) {

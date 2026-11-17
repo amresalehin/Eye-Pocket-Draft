@@ -11,6 +11,7 @@ import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
+import com.amresalehin.emregallery.ffmpeg.FfmpegKitEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import android.media.MediaScannerConnection
@@ -90,7 +91,12 @@ class MediaDownloadWorker(
         val sourceDomain = inputData.getString(KEY_SOURCE_DOMAIN) ?: ""
         val sourceUrl = inputData.getString(KEY_SOURCE_URL) ?: mediaUrl
         val sourceEngine = inputData.getString(KEY_SOURCE_ENGINE) ?: ""
+        val itemRequiresAudio = inputData.getBoolean(KEY_REQUIRES_AUDIO, false)
         val headersJson = inputData.getString(KEY_HEADERS_JSON)
+
+        val youtubeVideoId = MediaClassifier.extractYouTubeVideoId(sourceUrl)
+        val stableIdentityUrl = youtubeVideoId?.let { "youtube:$it" } ?: mediaUrl
+        val stableDownloadId = OkHttpDownloader.generateDeterministicId(stableIdentityUrl, fileName)
 
         val downloadHeaders: Map<String, String> = runCatching {
             if (!headersJson.isNullOrBlank()) {
@@ -119,6 +125,8 @@ class MediaDownloadWorker(
         try {
             var downloadedFile: File? = null
             var errorDiagnostic: String? = null
+            var extractorRequiresVideo = false
+            var extractorRequiresAudio = itemRequiresAudio
 
             setProgress(workDataOf(KEY_PROGRESS to 0.15f, KEY_STATUS to "Downloading $title..."))
             DownloadActivityManager.updateProgress(itemId, 0.15f, 0L, 0L, 0L)
@@ -162,7 +170,7 @@ class MediaDownloadWorker(
                     mediaUrl = mediaUrl,
                     fileName = fileName,
                     referer = referer ?: sourceUrl,
-                    downloadId = itemId,
+                    downloadId = stableDownloadId,
                     headers = downloadHeaders,
                     domain = effectiveDomain,
                     onProgress = { bytesRead, totalBytes ->
@@ -178,7 +186,7 @@ class MediaDownloadWorker(
             // Strategy 2: Originating extractor (yt-dlp or gallery-dl) when required or as fallback
             if ((downloadedFile == null || !downloadedFile.exists() || downloadedFile.length() == 0L) && GalleryDlEngine.isAvailable()) {
                 setProgress(workDataOf(KEY_PROGRESS to 0.35f, KEY_STATUS to "Downloading via extractor engine: $title..."))
-                downloadedFile = GalleryDlEngine.downloadMedia(
+                val primaryResult = GalleryDlEngine.downloadMediaDetailed(
                     context = applicationContext,
                     mediaUrl = targetUrl,
                     fileName = fileName,
@@ -187,9 +195,12 @@ class MediaDownloadWorker(
                     cookies = cookieString,
                     domain = effectiveDomain
                 )
-                // If targetUrl != mediaUrl and extractor returned null, retry with mediaUrl directly
+                downloadedFile = primaryResult.file
+                extractorRequiresVideo = extractorRequiresVideo || primaryResult.requiresVideo
+                extractorRequiresAudio = extractorRequiresAudio || primaryResult.requiresAudio
+
                 if ((downloadedFile == null || !downloadedFile.exists() || downloadedFile.length() == 0L) && targetUrl != mediaUrl) {
-                    downloadedFile = GalleryDlEngine.downloadMedia(
+                    val directResult = GalleryDlEngine.downloadMediaDetailed(
                         context = applicationContext,
                         mediaUrl = mediaUrl,
                         fileName = fileName,
@@ -198,6 +209,9 @@ class MediaDownloadWorker(
                         cookies = cookieString,
                         domain = effectiveDomain
                     )
+                    downloadedFile = directResult.file
+                    extractorRequiresVideo = extractorRequiresVideo || directResult.requiresVideo
+                    extractorRequiresAudio = extractorRequiresAudio || directResult.requiresAudio
                 }
             }
 
@@ -209,7 +223,7 @@ class MediaDownloadWorker(
                     mediaUrl = mediaUrl,
                     fileName = fileName,
                     referer = referer ?: sourceUrl,
-                    downloadId = itemId,
+                    downloadId = stableDownloadId,
                     headers = downloadHeaders,
                     domain = effectiveDomain
                 )
@@ -223,6 +237,35 @@ class MediaDownloadWorker(
             if (isStopped) {
                 Log.d(TAG, "MediaDownloadWorker was stopped for $mediaUrl")
                 return@withContext Result.failure()
+            }
+
+            if (downloadedFile != null && downloadedFile.exists() && downloadedFile.length() > 0L) {
+                val mustHaveVideo = isVideo || (isStream && !isAudio) || extractorRequiresVideo
+                val mustHaveAudio = isAudio || extractorRequiresAudio
+                if (mustHaveVideo || mustHaveAudio) {
+                    val mediaInfo = FfmpegKitEngine.probeMedia(downloadedFile.absolutePath)
+                    val tracksValid = mediaInfo != null && MediaNormalizer.hasExpectedTracks(
+                        hasVideo = !mediaInfo.videoCodec.isNullOrBlank(),
+                        hasAudio = !mediaInfo.audioCodec.isNullOrBlank(),
+                        requireVideo = mustHaveVideo,
+                        requireAudio = mustHaveAudio
+                    ) && mediaInfo.durationSeconds > 0.0 && mediaInfo.sizeBytes > 0L
+
+                    if (!tracksValid) {
+                        val missingTracks = when {
+                            mustHaveVideo && mustHaveAudio -> "video and audio"
+                            mustHaveVideo -> "video"
+                            else -> "audio"
+                        }
+                        errorDiagnostic = if (mediaInfo == null) {
+                            "FFprobe could not verify the downloaded media; refusing to save an unverified file."
+                        } else {
+                            "Downloaded file is missing the required $missingTracks track; incomplete media was discarded."
+                        }
+                        downloadedFile.delete()
+                        downloadedFile = null
+                    }
+                }
             }
 
             if (downloadedFile != null && downloadedFile.exists() && downloadedFile.length() > 0L) {
@@ -329,6 +372,7 @@ class MediaDownloadWorker(
         const val KEY_SOURCE_URL = "source_url"
         const val KEY_SOURCE_ENGINE = "source_engine"
         const val KEY_HEADERS_JSON = "headers_json"
+        const val KEY_REQUIRES_AUDIO = "requires_audio"
 
         const val KEY_PROGRESS = "progress"
         const val KEY_BYTES_READ = "bytes_read"

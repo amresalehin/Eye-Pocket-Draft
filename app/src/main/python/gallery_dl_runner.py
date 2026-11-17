@@ -645,6 +645,13 @@ def extract_yt_dlp(url, options_json="{}"):
 
                     is_audio_only = entry.get("vcodec") == "none" or v_ext in ["mp3", "m4a", "opus", "aac"]
                     is_stream = (".m3u8" in direct_url) or (".mpd" in direct_url)
+                    # Preserve whether this video exposes an audio-bearing representation.
+                    has_entry_audio = entry.get("acodec") not in (None, "none")
+                    has_audio_format = any(
+                        isinstance(fmt, dict) and fmt.get("url") and fmt.get("acodec") not in (None, "none")
+                        for fmt in formats
+                    )
+                    requires_audio = (not is_audio_only) and (has_entry_audio or has_audio_format)
                     category = "AUDIO" if is_audio_only else ("STREAMS" if is_stream else "VIDEOS")
 
                     url_hash = hashlib.sha256(direct_url.encode('utf-8')).hexdigest()[:12]
@@ -658,6 +665,7 @@ def extract_yt_dlp(url, options_json="{}"):
                         "isVideo": not is_audio_only,
                         "isAudio": is_audio_only,
                         "isStream": is_stream,
+                        "requiresAudio": bool(requires_audio),
                         "thumbnailUrl": thumb,
                         "resolutionHint": resolution_hint,
                         "sizeBytes": filesize,
@@ -841,13 +849,16 @@ def resolve_ytdlp_formats(url, referer="", user_agent=None, cookies=None, header
                 # Do not downgrade to a lower-resolution pre-muxed format when a
                 # higher-quality video plus a separate audio track is available.
                 if best_video and best_audio and video_rank(best_video) > video_rank(best_muxed):
-                    common.update({"mode": "mux", "video": payload(best_video), "audio": payload(best_audio)})
+                    common.update({
+                        "mode": "mux", "hasVideo": True, "hasAudio": True,
+                        "video": payload(best_video), "audio": payload(best_audio)
+                    })
                 else:
                     common.update({"mode": "single", "hasVideo": True, "hasAudio": True, "format": payload(best_muxed)})
                 return json.dumps(common)
             if video_only and audio_only:
                 common.update({
-                    "mode": "mux",
+                    "mode": "mux", "hasVideo": True, "hasAudio": True,
                     "video": payload(max(video_only, key=video_rank)),
                     "audio": payload(max(audio_only, key=audio_rank))
                 })

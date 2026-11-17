@@ -4,6 +4,7 @@ import com.amresalehin.emregallery.data.BrowserTabSession
 import com.amresalehin.emregallery.data.PocketDiscoveryCoordinator
 import com.amresalehin.emregallery.data.MediaCategory
 import com.amresalehin.emregallery.data.MediaClassifier
+import com.amresalehin.emregallery.data.MediaNormalizer
 import com.amresalehin.emregallery.data.MediaProvenance
 import com.amresalehin.emregallery.data.ScrapedMediaItem
 import org.junit.Assert.assertEquals
@@ -13,6 +14,56 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MediaDeduplicationPureUnitTest {
+
+    @Test
+    fun stableIdentityHashIgnoresTrackingAndCdnVariantParameters() {
+        val first = "https://cdn.example.com/video.mp4?utm_source=one&w=320"
+        val second = "https://cdn.example.com/video.mp4?utm_campaign=two&w=1080"
+
+        assertEquals(
+            MediaNormalizer.stableIdentityHash(first),
+            MediaNormalizer.stableIdentityHash(second)
+        )
+    }
+
+    @Test
+    fun stableIdentityHashPreservesMeaningfulResourceTokens() {
+        val first = "https://cdn.example.com/video.mp4?token=alpha"
+        val second = "https://cdn.example.com/video.mp4?token=beta"
+
+        assertFalse(
+            MediaNormalizer.stableIdentityHash(first) ==
+                MediaNormalizer.stableIdentityHash(second)
+        )
+    }
+
+    @Test
+    fun finalMediaValidationRejectsVideoWhenRequiredAudioIsMissing() {
+        assertFalse(
+            MediaNormalizer.hasExpectedTracks(
+                hasVideo = true,
+                hasAudio = false,
+                requireVideo = true,
+                requireAudio = true
+            )
+        )
+        assertTrue(
+            MediaNormalizer.hasExpectedTracks(
+                hasVideo = true,
+                hasAudio = true,
+                requireVideo = true,
+                requireAudio = true
+            )
+        )
+        assertTrue(
+            MediaNormalizer.hasExpectedTracks(
+                hasVideo = true,
+                hasAudio = false,
+                requireVideo = true,
+                requireAudio = false
+            )
+        )
+    }
 
     @Test
     fun browserTabMediaCountResetsWhenNavigatingToAnotherPage() {

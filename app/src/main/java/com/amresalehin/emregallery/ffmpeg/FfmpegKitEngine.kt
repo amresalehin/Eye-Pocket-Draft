@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.Environment
 import android.util.Log
+import com.amresalehin.emregallery.data.MediaNormalizer
 import com.arthenica.ffmpegkit.FFmpegKit
 import com.arthenica.ffmpegkit.FFmpegKitConfig
 import com.arthenica.ffmpegkit.FFprobeKit
@@ -504,7 +505,9 @@ object FfmpegKitEngine {
         streamUrl: String,
         outputFile: File,
         context: Context? = null,
-        headers: Map<String, String> = emptyMap()
+        headers: Map<String, String> = emptyMap(),
+        requireVideo: Boolean = true,
+        requireAudio: Boolean = false
     ): FfmpegExecutionResult = withContext(Dispatchers.IO) {
         fun quote(value: String): String =
             "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
@@ -524,24 +527,33 @@ object FfmpegKitEngine {
         tempFile.delete()
 
         val inputArg = headerArg + "-i ${quote(streamUrl)}"
-        val copyCmd = "-y $inputArg -map 0:v:0? -map 0:a:0? -sn -dn -c copy -movflags +faststart ${quote(tempFile.absolutePath)}"
+        val videoMap = if (requireVideo) "-map 0:v:0" else "-map 0:v:0?"
+        val audioMap = if (requireAudio) "-map 0:a:0" else "-map 0:a:0?"
+        val streamMaps = "$videoMap $audioMap"
+        val copyCmd = "-y $inputArg $streamMaps -sn -dn -c copy -movflags +faststart ${quote(tempFile.absolutePath)}"
         var result = executeCommand(copyCmd)
 
-        suspend fun hasValidVideo(): Boolean {
+        suspend fun hasValidExpectedTracks(): Boolean {
             if (!tempFile.isFile || tempFile.length() <= 0L) return false
             val info = probeMedia(tempFile.absolutePath) ?: return false
-            return !info.videoCodec.isNullOrBlank() && info.durationSeconds > 0.0 && info.sizeBytes > 0L
+            val tracksValid = MediaNormalizer.hasExpectedTracks(
+                hasVideo = !info.videoCodec.isNullOrBlank(),
+                hasAudio = !info.audioCodec.isNullOrBlank(),
+                requireVideo = requireVideo,
+                requireAudio = requireAudio
+            )
+            return tracksValid && info.durationSeconds > 0.0 && info.sizeBytes > 0L
         }
 
-        if (!result.isSuccess || !hasValidVideo()) {
+        if (!result.isSuccess || !hasValidExpectedTracks()) {
             tempFile.delete()
-            val transcodeCmd = "-y $inputArg -map 0:v:0? -map 0:a:0? -sn -dn " +
+            val transcodeCmd = "-y $inputArg $streamMaps -sn -dn " +
                 "-c:v libx264 -preset fast -crf 20 -c:a aac -b:a 192k " +
                 "-movflags +faststart ${quote(tempFile.absolutePath)}"
             result = executeCommand(transcodeCmd)
         }
 
-        if (!result.isSuccess || !hasValidVideo()) {
+        if (!result.isSuccess || !hasValidExpectedTracks()) {
             tempFile.delete()
             outputFile.delete()
             result.copy(isSuccess = false, outputFile = null)

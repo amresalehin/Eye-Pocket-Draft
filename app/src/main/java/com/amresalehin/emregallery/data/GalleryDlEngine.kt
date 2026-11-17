@@ -53,6 +53,13 @@ data class GalleryDlExtractResult(
     val errorMessage: String? = null
 )
 
+data class GalleryDlDownloadResult(
+    val file: File?,
+    val requiresVideo: Boolean = false,
+    val requiresAudio: Boolean = false,
+    val handledByYtDlp: Boolean = false
+)
+
 /**
  * Gallery-dl and yt-dlp integration service powered by Chaquopy Python SDK on Android.
  * yt-dlp is the primary engine; gallery-dl serves as secondary for galleries and image hosts.
@@ -297,7 +304,10 @@ object GalleryDlEngine {
                     extractorEngine = obj.optString("source", "yt-dlp / gallery-dl"),
                     pageUrl = pageUrl
                 ),
-                metadata = mapOf("source_url" to pageUrl),
+                metadata = buildMap {
+                    put("source_url", pageUrl)
+                    if (obj.optBoolean("requiresAudio", false)) put("requires_audio", "true")
+                },
                 downloadHeaders = mapOf(
                     "User-Agent" to OkHttpDownloader.DEFAULT_USER_AGENT,
                     "Referer" to pageUrl
@@ -395,14 +405,33 @@ object GalleryDlEngine {
         headers: Map<String, String>? = null,
         cookies: String? = null,
         domain: String? = null
-    ): File? = withContext(Dispatchers.IO) {
+    ): File? = downloadMediaDetailed(
+        context, mediaUrl, fileName, referer, headers, cookies, domain
+    ).file
+
+    /**
+     * Detailed result for workers that validate yt-dlp's selected A/V streams.
+     */
+    suspend fun downloadMediaDetailed(
+        context: Context,
+        mediaUrl: String,
+        fileName: String,
+        referer: String? = null,
+        headers: Map<String, String>? = null,
+        cookies: String? = null,
+        domain: String? = null
+    ): GalleryDlDownloadResult = withContext(Dispatchers.IO) {
         try {
             val effectiveDomain = domain?.replace(Regex("[^a-zA-Z0-9.-]"), "_")?.trim()?.takeIf { it.isNotBlank() }
                 ?: OkHttpDownloader.extractDomain(referer ?: mediaUrl)
             val dir = OkHttpDownloader.getTargetStorageDir(context, effectiveDomain)
 
             val sanitizedName = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
-            val targetFile = File(dir, "${System.currentTimeMillis()}_$sanitizedName")
+            val identityUrl = canonicalDownloadIdentity(mediaUrl, referer)
+            val targetFile = File(
+                dir,
+                OkHttpDownloader.generateDeterministicId(identityUrl, sanitizedName)
+            )
 
             val userAgent = headers?.get("User-Agent") ?: BotDetectionMitigator.STEALTH_USER_AGENT
             val effectiveCookies = cookies ?: headers?.get("Cookie")
@@ -437,7 +466,12 @@ object GalleryDlEngine {
                     domain = effectiveDomain
                 )
                 if (nativeAttempt.handled) {
-                    return@withContext nativeAttempt.file
+                    return@withContext GalleryDlDownloadResult(
+                        file = nativeAttempt.file,
+                        requiresVideo = nativeAttempt.requiresVideo,
+                        requiresAudio = nativeAttempt.requiresAudio,
+                        handledByYtDlp = true
+                    )
                 }
             }
 
@@ -461,23 +495,50 @@ object GalleryDlEngine {
                         null,
                         null
                     )
-                    return@withContext targetFile
+                    return@withContext GalleryDlDownloadResult(
+                        file = targetFile,
+                        handledByYtDlp = ytDlpCanHandle
+                    )
                 }
             }
 
             // Exclusively handled by yt-dlp & gallery-dl. Return null if both failed.
-            null
+            GalleryDlDownloadResult(file = null)
         } catch (e: Exception) {
             Log.e(TAG, "downloadMedia failed", e)
-            null
+            GalleryDlDownloadResult(file = null)
         }
     }
 
 
     private data class NativeYtDlpAttempt(
         val handled: Boolean,
-        val file: File?
+        val file: File?,
+        val requiresVideo: Boolean = false,
+        val requiresAudio: Boolean = false
     )
+
+    private fun canonicalDownloadIdentity(mediaUrl: String, referer: String?): String {
+        val source = referer?.takeIf { it.isNotBlank() }.orEmpty()
+        val videoId = MediaClassifier.extractYouTubeVideoId(source)
+            ?: MediaClassifier.extractYouTubeVideoId(mediaUrl)
+        return videoId?.let { "youtube:$it" } ?: mediaUrl
+    }
+
+    private suspend fun hasValidNativeOutput(
+        file: File,
+        requiresVideo: Boolean,
+        requiresAudio: Boolean
+    ): Boolean {
+        if (!file.isFile || file.length() <= 0L) return false
+        val info = FfmpegKitEngine.probeMedia(file.absolutePath) ?: return false
+        return MediaNormalizer.hasExpectedTracks(
+            hasVideo = !info.videoCodec.isNullOrBlank(),
+            hasAudio = !info.audioCodec.isNullOrBlank(),
+            requireVideo = requiresVideo,
+            requireAudio = requiresAudio
+        ) && info.durationSeconds > 0.0 && info.sizeBytes > 0L
+    }
 
     /**
      * yt-dlp resolves the best formats; OkHttp downloads the selected tracks and
@@ -496,6 +557,9 @@ object GalleryDlEngine {
     ): NativeYtDlpAttempt = withContext(Dispatchers.IO) {
         var tempDir: File? = null
         var resolverSucceeded = false
+        var requiresVideo = false
+        var requiresAudio = false
+        val identityUrl = canonicalDownloadIdentity(mediaUrl, referer)
         try {
             val effectiveHeaders = headers.toMutableMap().apply {
                 if (userAgent.isNotBlank()) put("User-Agent", userAgent)
@@ -520,6 +584,9 @@ object GalleryDlEngine {
                 return@withContext NativeYtDlpAttempt(false, null)
             }
             resolverSucceeded = true
+            val resolvedMode = resolved.optString("mode", "")
+            requiresVideo = resolvedMode == "mux" || resolved.optBoolean("hasVideo", false)
+            requiresAudio = resolvedMode == "mux" || resolved.optBoolean("hasAudio", false)
 
             fun streamHeaders(spec: JSONObject): Map<String, String> {
                 val result = effectiveHeaders.toMutableMap()
@@ -553,25 +620,35 @@ object GalleryDlEngine {
             val outputDirectory = OkHttpDownloader.getTargetStorageDir(context, domain)
             val safeName = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_").ifBlank { "media" }
             val baseName = safeName.substringBeforeLast('.', safeName)
+            val stableMp4Name = OkHttpDownloader.generateDeterministicId(identityUrl, "$baseName.mp4")
+            val stableMp4File = File(outputDirectory, stableMp4Name)
             val mode = resolved.optString("mode", "")
 
             if (mode == "mux") {
                 val videoSpec = resolved.optJSONObject("video")
-                    ?: return@withContext NativeYtDlpAttempt(true, null)
+                    ?: return@withContext NativeYtDlpAttempt(true, null, requiresVideo, requiresAudio)
                 val audioSpec = resolved.optJSONObject("audio")
-                    ?: return@withContext NativeYtDlpAttempt(true, null)
+                    ?: return@withContext NativeYtDlpAttempt(true, null, requiresVideo, requiresAudio)
 
-                tempDir = File(context.cacheDir, "yt-dlp-mux-${mediaUrl.hashCode().toUInt()}-${System.nanoTime()}")
+                if (hasValidNativeOutput(stableMp4File, true, true)) {
+                    return@withContext NativeYtDlpAttempt(true, stableMp4File, true, true)
+                }
+                stableMp4File.delete()
+
+                tempDir = File(
+                    context.cacheDir,
+                    "yt-dlp-mux-${MediaNormalizer.stableIdentityHash(identityUrl).take(20)}-${System.nanoTime()}"
+                )
                 if (!tempDir!!.mkdirs() && !tempDir!!.isDirectory) {
-                    return@withContext NativeYtDlpAttempt(true, null)
+                    return@withContext NativeYtDlpAttempt(true, null, requiresVideo, requiresAudio)
                 }
 
                 val videoFile = downloadPart(videoSpec, "video", tempDir!!)
-                    ?: return@withContext NativeYtDlpAttempt(true, null)
+                    ?: return@withContext NativeYtDlpAttempt(true, null, requiresVideo, requiresAudio)
                 val audioFile = downloadPart(audioSpec, "audio", tempDir!!)
-                    ?: return@withContext NativeYtDlpAttempt(true, null)
+                    ?: return@withContext NativeYtDlpAttempt(true, null, requiresVideo, requiresAudio)
 
-                val finalFile = File(outputDirectory, "${System.currentTimeMillis()}_${baseName}.mp4")
+                val finalFile = stableMp4File
                 val stagingDirectory = File(outputDirectory, ".ffmpeg-staging")
                 if (!stagingDirectory.exists()) stagingDirectory.mkdirs()
                 val temporaryOutputDirectory = if (stagingDirectory.isDirectory) stagingDirectory else tempDir!!
@@ -584,7 +661,7 @@ object GalleryDlEngine {
                 )
                 if (!muxed || !temporaryOutput.isFile || temporaryOutput.length() <= 0L) {
                     temporaryOutput.delete()
-                    return@withContext NativeYtDlpAttempt(true, null)
+                    return@withContext NativeYtDlpAttempt(true, null, requiresVideo, requiresAudio)
                 }
                 val publishTemp = File(outputDirectory, ".${finalFile.name}.${System.nanoTime()}.publishing")
                 val published = if (temporaryOutput.renameTo(finalFile)) {
@@ -602,34 +679,39 @@ object GalleryDlEngine {
                     temporaryOutput.delete()
                     publishTemp.delete()
                     finalFile.delete()
-                    return@withContext NativeYtDlpAttempt(true, null)
+                    return@withContext NativeYtDlpAttempt(true, null, requiresVideo, requiresAudio)
                 }
                 android.media.MediaScannerConnection.scanFile(
                     context, arrayOf(finalFile.absolutePath), arrayOf("video/mp4"), null
                 )
-                return@withContext NativeYtDlpAttempt(true, finalFile)
+                return@withContext NativeYtDlpAttempt(true, finalFile, requiresVideo, requiresAudio)
             }
 
             if (mode == "single") {
                 val formatSpec = resolved.optJSONObject("format")
-                    ?: return@withContext NativeYtDlpAttempt(true, null)
+                    ?: return@withContext NativeYtDlpAttempt(true, null, requiresVideo, requiresAudio)
                 val streamUrl = formatSpec.optString("url", "")
-                if (streamUrl.isBlank()) return@withContext NativeYtDlpAttempt(true, null)
+                if (streamUrl.isBlank()) return@withContext NativeYtDlpAttempt(true, null, requiresVideo, requiresAudio)
 
                 val isManifest = streamUrl.contains(".m3u8", ignoreCase = true) ||
                     streamUrl.contains(".mpd", ignoreCase = true)
                 if (isManifest) {
-                    val finalFile = File(outputDirectory, "${System.currentTimeMillis()}_${baseName}.mp4")
+                    if (hasValidNativeOutput(stableMp4File, requiresVideo, requiresAudio)) {
+                        return@withContext NativeYtDlpAttempt(true, stableMp4File, requiresVideo, requiresAudio)
+                    }
+                    stableMp4File.delete()
                     val remux = FfmpegKitEngine.remuxStream(
                         streamUrl = streamUrl,
-                        outputFile = finalFile,
+                        outputFile = stableMp4File,
                         context = context,
-                        headers = streamHeaders(formatSpec)
+                        headers = streamHeaders(formatSpec),
+                        requireVideo = requiresVideo,
+                        requireAudio = requiresAudio
                     )
-                    return@withContext NativeYtDlpAttempt(
-                        true,
-                        finalFile.takeIf { remux.isSuccess && it.isFile && it.length() > 0L }
-                    )
+                    val remuxedFile = stableMp4File.takeIf {
+                        remux.isSuccess && hasValidNativeOutput(it, requiresVideo, requiresAudio)
+                    }
+                    return@withContext NativeYtDlpAttempt(true, remuxedFile, requiresVideo, requiresAudio)
                 }
 
                 val ext = formatSpec.optString("ext", safeName.substringAfterLast('.', "mp4")).lowercase()
@@ -639,17 +721,19 @@ object GalleryDlEngine {
                 } else {
                     "$baseName.$ext"
                 }
+                val stableDirectName = OkHttpDownloader.generateDeterministicId(identityUrl, outputName)
                 val directResult = OkHttpDownloader.downloadMediaFileDetailed(
                     context = context,
                     mediaUrl = streamUrl,
                     fileName = outputName,
                     referer = resolved.optString("pageUrl").takeIf { it.isNotBlank() } ?: referer,
                     headers = streamHeaders(formatSpec),
-                    domain = domain
+                    domain = domain,
+                    downloadId = stableDirectName
                 )
                 val downloaded = directResult.file
                 if (!directResult.isSuccessful || downloaded == null || !downloaded.isFile || downloaded.length() <= 0L) {
-                    return@withContext NativeYtDlpAttempt(true, null)
+                    return@withContext NativeYtDlpAttempt(true, null, requiresVideo, requiresAudio)
                 }
 
                 val expectsVideo = resolved.optBoolean("hasVideo", false)
@@ -657,22 +741,26 @@ object GalleryDlEngine {
                 if (expectsVideo || expectsAudio) {
                     val info = FfmpegKitEngine.probeMedia(downloaded.absolutePath)
                     val valid = info != null &&
-                        (!expectsVideo || !info.videoCodec.isNullOrBlank()) &&
-                        (!expectsAudio || !info.audioCodec.isNullOrBlank()) &&
+                        MediaNormalizer.hasExpectedTracks(
+                            hasVideo = !info.videoCodec.isNullOrBlank(),
+                            hasAudio = !info.audioCodec.isNullOrBlank(),
+                            requireVideo = expectsVideo,
+                            requireAudio = expectsAudio
+                        ) &&
                         info.durationSeconds > 0.0 &&
                         info.sizeBytes > 0L
                     if (!valid) {
                         downloaded.delete()
-                        return@withContext NativeYtDlpAttempt(true, null)
+                        return@withContext NativeYtDlpAttempt(true, null, requiresVideo, requiresAudio)
                     }
                 }
-                return@withContext NativeYtDlpAttempt(true, downloaded)
+                return@withContext NativeYtDlpAttempt(true, downloaded, expectsVideo, expectsAudio)
             }
 
-            NativeYtDlpAttempt(false, null)
+            NativeYtDlpAttempt(false, null, requiresVideo, requiresAudio)
         } catch (e: Exception) {
             Log.w(TAG, "Native yt-dlp/FFmpeg path failed for media URL: ${e.message}")
-            NativeYtDlpAttempt(resolverSucceeded, null)
+            NativeYtDlpAttempt(resolverSucceeded, null, requiresVideo, requiresAudio)
         } finally {
             tempDir?.let { runCatching { it.deleteRecursively() } }
         }

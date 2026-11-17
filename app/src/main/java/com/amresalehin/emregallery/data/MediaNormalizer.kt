@@ -137,6 +137,30 @@ object MediaNormalizer {
     }
 
     /**
+     * Full SHA-256 identity for WorkManager and on-disk naming.
+     * Uses the same canonical URL as media deduplication.
+     */
+    fun stableIdentityHash(url: String): String {
+        val identity = canonicalKey(url).ifBlank { url.trim() }
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(identity.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { byte -> byte.toUByte().toString(16).padStart(2, '0') }
+    }
+
+    /**
+     * Ensures every required stream type exists in the final container.
+     */
+    fun hasExpectedTracks(
+        hasVideo: Boolean,
+        hasAudio: Boolean,
+        requireVideo: Boolean,
+        requireAudio: Boolean
+    ): Boolean {
+        if (!requireVideo && !requireAudio) return hasVideo || hasAudio
+        return (!requireVideo || hasVideo) && (!requireAudio || hasAudio)
+    }
+
+    /**
      * Deduplicates a list of MediaInboxItem by grouping CDN size variants
      * by canonical key, and keeping the largest / highest-quality variant in each group.
      * Prevents over-merging by strictly preserving identifying query parameters.
