@@ -490,8 +490,8 @@ object MediaCaptureEngine {
             ),
             metadata = metadataMap,
             downloadHeaders = headers,
-            width = declaredWidth ?: extractDimension(resolutionHint, cleanedUrl, true),
-            height = declaredHeight ?: extractDimension(resolutionHint, cleanedUrl, false)
+            width = declaredWidth ?: extractDimension(resolutionHint, "", true),
+            height = declaredHeight ?: extractDimension(resolutionHint, "", false)
         )
     }
 
