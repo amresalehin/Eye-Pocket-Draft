@@ -555,8 +555,6 @@ object LinkMetadataFetcher {
                     addCandidate(
                         candidate,
                         alt,
-                        width = img.attr("width").toIntOrNull(),
-                        height = img.attr("height").toIntOrNull()
                     )
                 }
             }
@@ -572,8 +570,6 @@ object LinkMetadataFetcher {
                     addCandidate(
                         u,
                         alt,
-                        width = img.attr("width").toIntOrNull(),
-                        height = img.attr("height").toIntOrNull()
                     )
                 }
             }
@@ -613,9 +609,7 @@ object LinkMetadataFetcher {
             if (src.isNotBlank()) addCandidate(
                 src,
                 "Video",
-                isVideo = true,
-                width = vid.attr("width").toIntOrNull(),
-                height = vid.attr("height").toIntOrNull()
+                isVideo = true
             )
             vid.select("source").forEach { s ->
                 val sSrc = s.absUrl("src").ifBlank { s.attr("src") }
