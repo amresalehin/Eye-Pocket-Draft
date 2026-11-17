@@ -113,7 +113,10 @@ object DownloadQueueManager {
             .putString(MediaDownloadWorker.KEY_STACK_ID, sId)
             .putString(MediaDownloadWorker.KEY_STACK_TITLE, sTitle)
             .putString(MediaDownloadWorker.KEY_SOURCE_DOMAIN, domain)
-            .putString(MediaDownloadWorker.KEY_SOURCE_URL, url)
+            .putString(
+                MediaDownloadWorker.KEY_SOURCE_URL,
+                item.metadata["source_url"]?.takeIf { it.isNotBlank() } ?: url
+            )
             .putString(MediaDownloadWorker.KEY_SOURCE_ENGINE, item.provenance.extractorEngine)
             .apply {
                 if (!headersJson.isNullOrBlank()) {
@@ -224,7 +227,10 @@ object DownloadQueueManager {
                 .putString(MediaDownloadWorker.KEY_STACK_ID, sId)
                 .putString(MediaDownloadWorker.KEY_STACK_TITLE, sTitle)
                 .putString(MediaDownloadWorker.KEY_SOURCE_DOMAIN, domain)
-                .putString(MediaDownloadWorker.KEY_SOURCE_URL, url)
+                .putString(
+                MediaDownloadWorker.KEY_SOURCE_URL,
+                item.metadata["source_url"]?.takeIf { it.isNotBlank() } ?: url
+            )
                 .putString(MediaDownloadWorker.KEY_SOURCE_ENGINE, item.provenance.extractorEngine)
                 .apply {
                     if (!headersJson.isNullOrBlank()) {
