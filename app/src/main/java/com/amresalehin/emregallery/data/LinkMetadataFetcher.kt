@@ -72,8 +72,8 @@ object LinkMetadataFetcher {
                             format = item.format,
                             sizeBytes = item.sizeBytes ?: 0L,
                             dateAddedMillis = System.currentTimeMillis(),
-                            width = item.width ?: MediaCaptureEngine.extractDimension(item.resolutionHint, item.url, true) ?: 0,
-                            height = item.height ?: MediaCaptureEngine.extractDimension(item.resolutionHint, item.url, false) ?: 0
+                            width = item.width ?: MediaCaptureEngine.extractDimension(item.resolutionHint, "", true) ?: 0,
+                            height = item.height ?: MediaCaptureEngine.extractDimension(item.resolutionHint, "", false) ?: 0
                         )
                     }
                     val preview = gdlRes.previewImageUrl.ifBlank {
