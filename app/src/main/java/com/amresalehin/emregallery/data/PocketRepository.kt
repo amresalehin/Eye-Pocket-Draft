@@ -707,8 +707,11 @@ class PocketRepository(
             },
             previewImageUrl = initialPreview
         )
-        val updated = listOf(bookmark) + _bookmarks.value.filter {
-            it.id != bookmark.id && (it.sourceUrl.isBlank() || it.sourceUrl != cleanUrl)
+        val updated = listOf(bookmark) + _bookmarks.value.filter { existing ->
+            val isCanonicalDuplicate = bookmarkKey.isNotBlank() &&
+                existing.sourceUrl.isNotBlank() &&
+                MediaClassifier.bookmarkDeduplicationKey(existing.sourceUrl) == bookmarkKey
+            existing.id != bookmark.id && !isCanonicalDuplicate
         }
         _bookmarks.value = updated
         persist()
