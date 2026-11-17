@@ -13,6 +13,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -114,6 +116,7 @@ class PocketRepository(
 
     private val sizeCache = ConcurrentHashMap<String, Long>()
     private val activeProbes = ConcurrentHashMap.newKeySet<String>()
+    private val sizeProbeSemaphore = Semaphore(8)
 
     fun setMinSizeKb(sizeKb: Int) {
         _minSizeKb.value = sizeKb
@@ -348,18 +351,16 @@ class PocketRepository(
     private fun triggerAsyncHeadSize(url: String, itemId: String) {
         if (!url.startsWith("http://", ignoreCase = true) && !url.startsWith("https://", ignoreCase = true)) return
         if (!activeProbes.add(url)) return
-        if (activeProbes.size > MAX_ACTIVE_SIZE_PROBES) {
-            activeProbes.remove(url)
-            return
-        }
         coroutineScope.launch {
             try {
-                val result = OkHttpDownloader.probeDirectMedia(url)
-                val cl = result.contentLength
-                if (cl != null && cl > 0L) {
-                    sizeCache[url] = cl
-                    sizeCache[itemId] = cl
-                    updateItemSizeInBookmarks(itemId, url, cl)
+                sizeProbeSemaphore.withPermit {
+                    val result = OkHttpDownloader.probeDirectMedia(url)
+                    val contentLength = result.contentLength
+                    if (contentLength != null && contentLength > 0L) {
+                        sizeCache[url] = contentLength
+                        sizeCache[itemId] = contentLength
+                        updateItemSizeInBookmarks(itemId, url, contentLength)
+                    }
                 }
             } catch (_: Exception) {
             } finally {
@@ -985,7 +986,6 @@ class PocketRepository(
         const val DEFAULT_MIN_WIDTH = 480
         const val DEFAULT_MIN_HEIGHT = 540
         const val DEFAULT_MIN_SIZE_KB = 10
-        private const val MAX_ACTIVE_SIZE_PROBES = 8
 
         @Volatile
         private var INSTANCE: PocketRepository? = null
