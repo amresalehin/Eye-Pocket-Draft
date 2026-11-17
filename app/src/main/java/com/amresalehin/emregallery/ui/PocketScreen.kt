@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
@@ -1012,7 +1013,7 @@ fun PocketBookmarkStaggeredCard(
             when {
                 item.localUri.startsWith("content://", ignoreCase = true) -> item.localUri
                 item.localUri.startsWith("file://", ignoreCase = true) -> {
-                    val file = File(item.localUri.removePrefix("file://"))
+                    val file = File(Uri.parse(item.localUri).path.orEmpty())
                     if (file.exists()) file.absolutePath else item.sourceUrl.ifBlank { item.localUri }
                 }
                 item.localUri.startsWith("/") -> {
