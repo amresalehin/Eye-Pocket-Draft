@@ -297,9 +297,9 @@ class LinkMetadataUnitTest {
         val missingHeight = exactMinimum.copy(id = "missing-height", height = 0)
         val unknownDimensions = MediaInboxItem(
             id = "unknown-dimensions",
-            title = "unmeasured.jpg",
+            title = "wallpaper_4000x3000.jpg",
             localUri = "",
-            sourceUrl = "",
+            sourceUrl = "https://cdn.example.com/wallpaper_4000x3000.jpg?w=4000&h=3000",
             isVideo = false
         )
         val videoWithoutDimensions = MediaInboxItem(
