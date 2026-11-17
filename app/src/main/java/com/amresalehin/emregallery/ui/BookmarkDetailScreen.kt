@@ -821,7 +821,8 @@ fun PocketBookmarkViewerPage(
                                 .testTag("deck_empty_filtered_card")
                         ) {
                             val isDeepScanning = activeDeepScanId == stack.id
-                            if (stack.previewImageUrl.isNotBlank()) {
+                            if (stack.previewImageUrl.isNotBlank() &&
+                                !stack.previewImageUrl.contains("google.com/s2/favicons", ignoreCase = true)) {
                                 Box(modifier = Modifier.fillMaxSize()) {
                                     AsyncImage(
                                         model = ImageRequest.Builder(context)
@@ -1367,7 +1368,10 @@ fun PocketBookmarkViewerPage(
  * For link bookmarks: displays clear favicon and domain fallback.
  */
 private fun resolvePocketMediaPath(item: MediaInboxItem?, fallbackUrl: String = ""): String {
-    if (item == null) return fallbackUrl
+    val usableFallback = fallbackUrl.takeIf {
+        it.isNotBlank() && !it.contains("google.com/s2/favicons", ignoreCase = true)
+    }.orEmpty()
+    if (item == null) return usableFallback
     val local = item.localUri.trim()
     return when {
         local.startsWith("content://", ignoreCase = true) -> local
@@ -1380,7 +1384,7 @@ private fun resolvePocketMediaPath(item: MediaInboxItem?, fallbackUrl: String = 
             val file = File(local)
             if (file.exists()) file.absolutePath else item.sourceUrl.ifBlank { local }
         }
-        else -> item.sourceUrl.ifBlank { local.ifBlank { fallbackUrl } }
+        else -> item.sourceUrl.ifBlank { local.ifBlank { usableFallback } }
     }
 }
 
