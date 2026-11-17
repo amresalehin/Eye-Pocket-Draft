@@ -295,8 +295,8 @@ object PocketDeepScanEngine {
                                el.getAttribute('data-lazy-src') || el.getAttribute('data-large-file') ||
                                el.getAttribute('data-hi-res-src');
                     var alt = el.getAttribute('alt') || el.getAttribute('title') || '';
-                    var imgWidth = el.naturalWidth || el.width || 0;
-                    var imgHeight = el.naturalHeight || el.height || 0;
+                    var imgWidth = el.naturalWidth || 0;
+                    var imgHeight = el.naturalHeight || 0;
                     if (lazy) add(lazy, alt, false, imgWidth, imgHeight);
                     if (src) add(src, alt, false, imgWidth, imgHeight);
 
@@ -331,7 +331,7 @@ object PocketDeepScanEngine {
                     var poster = vEl.getAttribute('poster');
                     if (poster) add(poster, 'Video Poster', false);
                     var vSrc = vEl.currentSrc || vEl.src || vEl.getAttribute('data-src') || vEl.getAttribute('data-url');
-                    if (vSrc) add(vSrc, 'Video', true, vEl.videoWidth || vEl.width, vEl.videoHeight || vEl.height);
+                    if (vSrc) add(vSrc, 'Video', true, vEl.videoWidth, vEl.videoHeight);
                     var vs = vEl.getElementsByTagName('source');
                     for (var vsIdx = 0; vsIdx < vs.length; vsIdx++) {
                         var vsSrc = vs[vsIdx].src || vs[vsIdx].getAttribute('data-src') || vs[vsIdx].getAttribute('data-url');
