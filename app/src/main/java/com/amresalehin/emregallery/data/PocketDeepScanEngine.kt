@@ -456,10 +456,8 @@ object PocketDeepScanEngine {
                         isStream = isStream,
                         format = format,
                         dateAddedMillis = System.currentTimeMillis(),
-                        width = obj.optInt("width", 0).takeIf { it > 0 }
-                            ?: MediaCaptureEngine.extractDimension(null, resolvedUrl, true) ?: 0,
-                        height = obj.optInt("height", 0).takeIf { it > 0 }
-                            ?: MediaCaptureEngine.extractDimension(null, resolvedUrl, false) ?: 0
+                        width = obj.optInt("width", 0).takeIf { it > 0 } ?: 0,
+                        height = obj.optInt("height", 0).takeIf { it > 0 } ?: 0
                     )
                 )
             }
