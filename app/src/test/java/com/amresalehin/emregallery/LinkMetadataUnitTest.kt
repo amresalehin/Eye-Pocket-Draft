@@ -350,6 +350,24 @@ class LinkMetadataUnitTest {
     }
 
     @Test
+    fun testPocketSizeFilterDoesNotUseHlsManifestLengthAsMediaSize() {
+        val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
+        val repository = PocketRepository(context, scope)
+        val manifest = MediaInboxItem(
+            id = "hls-manifest",
+            title = "live.m3u8",
+            localUri = "",
+            sourceUrl = "https://cdn.example.com/live.m3u8?size=90000000",
+            isVideo = true,
+            isStream = true,
+            format = "M3U8"
+        )
+
+        assertEquals(0L, repository.resolveItemSizeBytes(manifest))
+        assertFalse(repository.itemMatchesSize(manifest, 10))
+    }
+
+    @Test
     fun testSanitizeStackFiltersUnknownCandidatesButPreservesPagePreview() {
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
         val repository = PocketRepository(context, scope)
