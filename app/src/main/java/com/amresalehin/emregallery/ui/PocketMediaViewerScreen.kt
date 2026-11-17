@@ -683,22 +683,25 @@ private fun executeSaveMedia(
         if (localFile != null && localFile.exists() && localFile.length() > 0L) {
             val destFile = File(targetDir, fileName)
             val copied = withContext(Dispatchers.IO) {
-                runCatching {
-                    if (!validateSavedMediaTracks(
-                            localFile,
-                            requireVideo = item.isVideo && !item.isAudio,
-                            requireAudio = item.isAudio || requiresAudio
+                val tracksValid = validateSavedMediaTracks(
+                    localFile,
+                    requireVideo = item.isVideo && !item.isAudio,
+                    requireAudio = item.isAudio || requiresAudio
+                )
+                if (!tracksValid) {
+                    false
+                } else {
+                    runCatching {
+                        localFile.copyTo(destFile, overwrite = true)
+                        MediaScannerConnection.scanFile(
+                            context,
+                            arrayOf(destFile.absolutePath),
+                            arrayOf(if (item.isVideo) "video/*" else "image/*"),
+                            null
                         )
-                    ) return@runCatching false
-                    localFile.copyTo(destFile, overwrite = true)
-                    MediaScannerConnection.scanFile(
-                        context,
-                        arrayOf(destFile.absolutePath),
-                        arrayOf(if (item.isVideo) "video/*" else "image/*"),
-                        null
-                    )
-                    true
-                }.getOrDefault(false)
+                        true
+                    }.getOrDefault(false)
+                }
             }
             if (copied) {
                 val fileUri = Uri.fromFile(destFile).toString()
