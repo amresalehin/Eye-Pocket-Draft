@@ -497,7 +497,7 @@ fun PocketBookmarkViewerPage(
                             }
                         }
 
-                        // 4. On-Demand 30s Deep Scan (Hardware-Accelerated with dynamic scan / stop toggle, no toast)
+                        // 4. On-demand full-page Deep Scan (Hardware-Accelerated with dynamic scan / stop toggle, no toast)
                         if (stack.sourceUrl.isNotBlank()) {
                             val isDeepScanning = activeDeepScanId == stack.id
                             Surface(

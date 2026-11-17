@@ -1073,6 +1073,14 @@ class PocketBookmarkUnitTest {
     }
 
     @Test
+    fun deepScanOnlyAutoFinishesAfterPageBottomAndRepeatedEmptyPasses() {
+        val engine = com.amresalehin.emregallery.data.PocketDeepScanEngine
+        assertFalse(engine.shouldExitAtBottom(reachedPageBottom = false, consecutiveEmptyCount = 100))
+        assertFalse(engine.shouldExitAtBottom(reachedPageBottom = true, consecutiveEmptyCount = 7))
+        assertTrue(engine.shouldExitAtBottom(reachedPageBottom = true, consecutiveEmptyCount = 8))
+    }
+
+    @Test
     fun testDeepScanStateManagementAndIncrementalMerging() {
         val engine = com.amresalehin.emregallery.data.PocketDeepScanEngine
         assertFalse("Engine should be idle initially", engine.isScanning())

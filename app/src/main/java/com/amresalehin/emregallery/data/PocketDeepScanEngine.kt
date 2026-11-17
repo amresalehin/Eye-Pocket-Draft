@@ -28,14 +28,14 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * On-demand, hardware-accelerated Deep Scan engine for JavaScript-heavy, scrollable websites.
- * Operates strictly upon user request with a hard 30-second cap.
+ * Operates only while the user has started a scan; the user can stop it at any time.
+ * Stops naturally after reaching the page bottom and seeing repeated empty extraction passes.
  * Streams discovered media incrementally back to the caller in real time.
  */
 object PocketDeepScanEngine {
     private const val TAG = "PocketDeepScanEngine"
-    private const val MAX_SCAN_DURATION_MS = 30_000L
     private const val SCROLL_CADENCE_MS = 1_000L
-    private const val EARLY_EXIT_CONSECUTIVE_EMPTY = 4
+    private const val EARLY_EXIT_CONSECUTIVE_EMPTY = 8
 
     private class ScanSession(val bookmarkId: String) {
         @Volatile var webView: WebView? = null
@@ -55,9 +55,13 @@ object PocketDeepScanEngine {
 
     fun getActiveBookmarkId(): String? = activeSession?.bookmarkId
 
+    internal fun shouldExitAtBottom(reachedPageBottom: Boolean, consecutiveEmptyCount: Int): Boolean {
+        return reachedPageBottom && consecutiveEmptyCount >= EARLY_EXIT_CONSECUTIVE_EMPTY
+    }
+
     /**
      * Starts an on-demand hardware-accelerated deep scan for the given bookmark URL.
-     * Capped strictly at 30 seconds or until manually stopped.
+     * Runs until the page is exhausted, memory protection stops the scan, or the user stops it.
      */
     fun startScan(
         context: Context,
@@ -83,8 +87,6 @@ object PocketDeepScanEngine {
             val appContext = context.applicationContext
             val seenUrls = mutableSetOf<String>()
             var consecutiveEmptyCount = 0
-            val startTime = System.currentTimeMillis()
-
             try {
                 if (!isActive || activeSession !== session) return@launch
 
@@ -103,12 +105,6 @@ object PocketDeepScanEngine {
                 delay(1_500L)
 
                 while (isActive && isScanning.get() && activeSession === session) {
-                    val elapsed = System.currentTimeMillis() - startTime
-                    if (elapsed >= MAX_SCAN_DURATION_MS) {
-                        Log.d(TAG, "Deep scan reached 30s maximum duration for $targetUrl. Auto-stopping.")
-                        break
-                    }
-
                     val currentWv = session.webView ?: break
 
                     // Active 30% RAM protection: enforce memory limit to prevent app freezes & renderer crashes
@@ -122,16 +118,25 @@ object PocketDeepScanEngine {
                         }
                     }
 
-                    // Trigger scroll on the page and prune heavy media buffers in off-screen DOM
+                    // Trigger the next lazy-load step and report whether the page has reached
+                    // its current bottom. The page height can still grow after network responses.
                     val scrollScript = """
                         (function() {
                             try {
                                 var scrollAmt = Math.max(Math.floor(window.innerHeight * 0.85), 500);
                                 window.scrollBy(0, scrollAmt);
-                            } catch(e) {}
+                                var root = document.scrollingElement || document.documentElement || document.body;
+                                var top = window.pageYOffset || root.scrollTop || 0;
+                                var viewport = window.innerHeight || root.clientHeight || 0;
+                                var height = Math.max(root.scrollHeight || 0, document.body ? document.body.scrollHeight : 0);
+                                return top + viewport >= height - 8;
+                            } catch(e) {
+                                return false;
+                            }
                         })();
                     """.trimIndent()
-                    currentWv.evaluateJavascript(scrollScript, null)
+                    val reachedPageBottom = evaluateJavascriptSuspend(currentWv, scrollScript)
+                        .trim().trim('"').equals("true", ignoreCase = true)
 
                     // Prune video and canvas buffers in Chromium renderer to prevent code -1 crashes
                     currentWv.evaluateJavascript(RamGovernor.MEDIA_BUFFER_PRUNING_JS, null)
@@ -155,9 +160,8 @@ object PocketDeepScanEngine {
                         }
                     } else {
                         consecutiveEmptyCount++
-                        // Preserve the existing bounded early-exit behavior.
-                        if (elapsed >= 8_000L && consecutiveEmptyCount >= EARLY_EXIT_CONSECUTIVE_EMPTY) {
-                            Log.d(TAG, "Early exit triggered: No new media after $consecutiveEmptyCount scrolls.")
+                        if (shouldExitAtBottom(reachedPageBottom, consecutiveEmptyCount)) {
+                            Log.d(TAG, "Deep scan reached page bottom with $consecutiveEmptyCount empty extraction passes.")
                             break
                         }
                     }
