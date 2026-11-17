@@ -12,6 +12,7 @@ import com.amresalehin.emregallery.data.MediaInboxStack
 import com.amresalehin.emregallery.data.MediaProvenance
 import com.amresalehin.emregallery.data.OkHttpDownloader
 import com.amresalehin.emregallery.data.MediaDownloadWorker
+import com.amresalehin.emregallery.data.DownloadQueueManager
 import com.amresalehin.emregallery.ffmpeg.FfprobeMediaInfo
 import com.amresalehin.emregallery.data.ScrapedMediaItem
 import com.amresalehin.emregallery.data.ScrapeResult
@@ -61,6 +62,23 @@ class MediaDownloaderTest {
             "different-bookmark-item-id"
         )
         assertEquals("One canonical URL must use one file identity across bookmarks", first, sameAssetFromAnotherBookmark)
+    }
+
+    @Test
+    fun queueIdentityUsesSha256AndCanonicalTrackingNormalization() {
+        val first = "https://example.com/Aa"
+        val second = "https://example.com/BB"
+        assertEquals("Test inputs deliberately collide under 32-bit String.hashCode", first.hashCode(), second.hashCode())
+        assertNotEquals(
+            "Distinct canonical media URLs must not share a WorkManager unique name",
+            DownloadQueueManager.uniqueWorkNameForUrl(first),
+            DownloadQueueManager.uniqueWorkNameForUrl(second)
+        )
+        assertEquals(
+            "Tracking-only URL differences should share one canonical work identity",
+            DownloadQueueManager.uniqueWorkNameForUrl("https://cdn.example.com/video.mp4?utm_source=one"),
+            DownloadQueueManager.uniqueWorkNameForUrl("https://cdn.example.com/video.mp4?utm_source=two")
+        )
     }
 
     @Test

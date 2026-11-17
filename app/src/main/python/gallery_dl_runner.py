@@ -931,13 +931,19 @@ def download_media_file(media_url, target_path, referer=None, user_agent=None, c
     if ytdlp_supported:
         if _download_with_ytdlp(media_url, target_path, referer, ua, cookies, extra_headers, mode):
             return True
-        # gallery-dl cannot guarantee an audio-only or muxed video result. Never return
-        # a different media type as a fallback for an explicit audio/video request.
-        if mode in ("audio", "video"):
+        # For audio-only requests, do not substitute a potentially muxed/video result
+        # when yt-dlp recognizes the source but cannot satisfy the requested audio format.
+        if mode == "audio":
             return False
 
-    # 2. Secondary fallback: gallery-dl (only when format is not constrained)
-    if mode == "best" and (is_gallery_dl_supported(media_url) or (referer and is_gallery_dl_supported(referer))):
+    # Keep gallery-dl as a real secondary engine. Video outputs are stream-validated by
+    # MediaDownloadWorker before completion; audio-only fallback is allowed only for
+    # sources yt-dlp does not recognize (for example, gallery-dl-specific extractors).
+    allow_gallery_fallback = mode in ("best", "video") or not ytdlp_supported
+    if allow_gallery_fallback and (
+        is_gallery_dl_supported(media_url) or
+        (referer and is_gallery_dl_supported(referer))
+    ):
         if _download_with_gallery_dl(media_url, target_path, referer, ua, cookies, extra_headers):
             return True
 
@@ -945,7 +951,7 @@ def download_media_file(media_url, target_path, referer=None, user_agent=None, c
     if _download_with_ytdlp(media_url, target_path, referer, ua, cookies, extra_headers, mode):
         return True
 
-    if mode == "best" and _download_with_gallery_dl(media_url, target_path, referer, ua, cookies, extra_headers):
+    if allow_gallery_fallback and _download_with_gallery_dl(media_url, target_path, referer, ua, cookies, extra_headers):
         return True
 
     return False
